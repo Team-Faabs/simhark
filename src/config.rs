@@ -19,10 +19,13 @@ pub const WALL_COUNT: usize = 10;
 /// Ball collision sub-steps (grSim uses 5).
 pub const BALL_COLLISION_SUBSTEPS: usize = 5;
 
-/// RoboCup SSL ball speed safety limit.
+/// Sanity cap for externally injected ball velocity (teleport commands).
+/// Gameplay ball speed is never clamped; the SSL excessive-ball-speed rule
+/// (6.5 m/s) is enforced by the autoref, not the physics.
 pub const MAX_BALL_SPEED: f64 = 10.0;
 
-/// Default kick/chip launch speed. This stays below the card threshold.
+/// Default kick/chip launch speed. This stays below the 6.5 m/s ball speed
+/// rule limit.
 pub const DEFAULT_KICK_SPEED: f64 = 3.5;
 
 /// Complete world configuration.

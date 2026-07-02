@@ -595,10 +595,9 @@ fn test_kick_contact_reenables_without_followup_command() {
 }
 
 #[test]
-fn test_flat_kick_hard_caps_ball_speed() {
+fn test_flat_kick_capped_by_max_kick_speed() {
   let mut config = WorldConfig::division_a();
   config.robots_per_team = 1;
-  config.blue_robots.max_linear_kick_speed = 20.0;
   let mut world = World::new(0, config);
   let robot_x = -3.0;
   let robot_y = -3.0;
@@ -636,22 +635,25 @@ fn test_flat_kick_hard_caps_ball_speed() {
   let state = world.get_state();
   let speed = ball_speed(&state);
   assert!(
-    speed <= MAX_BALL_SPEED + 1e-5,
-    "flat kick should be capped at {MAX_BALL_SPEED}m/s, got {speed}"
+    speed <= DEFAULT_KICK_SPEED + 1e-3,
+    "flat kick should be capped at the kicker hardware limit {DEFAULT_KICK_SPEED}m/s, got {speed}"
   );
-  let expected_angle = 3.0f64.atan2(20.0);
-  let launch_angle = state.ball.vy.atan2(state.ball.vx);
   assert!(
-    (launch_angle - expected_angle).abs() < 0.03,
-    "flat kick should scale the summed ball/kick velocity direction, got {launch_angle} rad"
+    state.ball.vx > DEFAULT_KICK_SPEED - 0.3,
+    "flat kick should launch forward at the capped speed, vx={}",
+    state.ball.vx
+  );
+  assert!(
+    state.ball.vy.abs() < 0.2,
+    "kicker mouth should absorb sideways ball velocity so the ball leaves along the heading, vy={}",
+    state.ball.vy
   );
 }
 
 #[test]
-fn test_chip_kick_hard_caps_ball_speed() {
+fn test_chip_kick_capped_by_max_kick_speed() {
   let mut config = WorldConfig::division_a();
   config.robots_per_team = 1;
-  config.blue_robots.max_chip_kick_speed = 20.0;
   let mut world = World::new(0, config);
   let robot_x = -3.0;
   let robot_y = -3.0;
@@ -689,13 +691,17 @@ fn test_chip_kick_hard_caps_ball_speed() {
   let state = world.get_state();
   let speed = ball_speed(&state);
   assert!(
-    speed <= MAX_BALL_SPEED + 1e-5,
-    "chip kick should be capped at {MAX_BALL_SPEED}m/s, got {speed}"
+    speed <= DEFAULT_KICK_SPEED + 1e-3,
+    "chip kick should be capped at the kicker hardware limit {DEFAULT_KICK_SPEED}m/s, got {speed}"
+  );
+  assert!(
+    speed > DEFAULT_KICK_SPEED - 0.5,
+    "chip kick should launch near the capped speed, got {speed}"
   );
 }
 
 #[test]
-fn test_flat_kick_adds_to_existing_ball_velocity() {
+fn test_flat_kick_inherits_kicker_contact_velocity() {
   let mut config = WorldConfig::division_a();
   config.robots_per_team = 1;
   let mut world = World::new(0, config);
@@ -708,7 +714,7 @@ fn test_flat_kick_adds_to_existing_ball_velocity() {
       y: Some(robot_y),
       z: Some(0.0),
       vx: Some(0.0),
-      vy: Some(1.0),
+      vy: Some(0.0),
       vz: Some(0.0),
     }),
     teleport_robots: vec![TeleportRobot {
@@ -718,7 +724,7 @@ fn test_flat_kick_adds_to_existing_ball_velocity() {
       y: Some(robot_y),
       orientation: Some(0.0),
       vx: Some(0.0),
-      vy: Some(0.0),
+      vy: Some(1.0),
       v_angular: Some(0.0),
       present: Some(true),
     }],
@@ -740,8 +746,59 @@ fn test_flat_kick_adds_to_existing_ball_velocity() {
   );
   assert!(
     state.ball.vy > 0.5,
-    "flat kick should preserve existing sideways ball velocity, vy={}",
+    "flat kick should inherit sideways kicker velocity, vy={}",
     state.ball.vy
+  );
+}
+
+#[test]
+fn test_one_touch_kick_rebounds_incoming_ball() {
+  let mut config = WorldConfig::division_a();
+  config.robots_per_team = 1;
+  let mut world = World::new(0, config);
+  let robot_x = -3.0;
+  let robot_y = -3.0;
+  let kick_speed = 2.0;
+  let incoming_speed = 2.0;
+
+  world.step(&WorldCommand {
+    teleport_ball: Some(TeleportBall {
+      x: Some(robot_x + world.config.blue_robots.center_from_kicker + world.config.ball.radius),
+      y: Some(robot_y),
+      z: Some(0.0),
+      vx: Some(-incoming_speed),
+      vy: Some(0.0),
+      vz: Some(0.0),
+    }),
+    teleport_robots: vec![TeleportRobot {
+      id: 0,
+      team: TeamColor::Blue,
+      x: Some(robot_x),
+      y: Some(robot_y),
+      orientation: Some(0.0),
+      vx: Some(0.0),
+      vy: Some(0.0),
+      v_angular: Some(0.0),
+      present: Some(true),
+    }],
+    blue: vec![RobotCommand {
+      id: 0,
+      move_command: None,
+      kick_speed,
+      kick_angle: 0.0,
+      dribbler_on: true,
+    }],
+    ..Default::default()
+  });
+
+  let state = world.get_state();
+  let expected =
+    kick_speed + incoming_speed * world.config.blue_robots.kicker_damp_factor;
+  assert!(
+    state.ball.vx > kick_speed && (state.ball.vx - expected).abs() < 0.2,
+    "one-touch kick should leave faster than kicking a stationary ball \
+     (kick + damped rebound of the incoming speed), expected ~{expected}, vx={}",
+    state.ball.vx
   );
 }
 

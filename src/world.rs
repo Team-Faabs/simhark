@@ -239,21 +239,31 @@ impl World {
           let speed_xy = kick_angle_rad.cos() * kick_speed;
           let speed_z = kick_angle_rad.sin() * kick_speed;
 
+          let ball_vel = self.physics.get_body_linvel(ball_body);
+          let chassis_vel = self.physics.get_body_linvel(handle.chassis_body);
+          let chassis_angvel = self.physics.get_body_angvel(handle.chassis_body);
           let dir_x = dir[0] as f32;
           let dir_y = dir[1] as f32;
-          let ball_vel = self.physics.get_body_linvel(ball_body);
+          let rel_x = ball_pos.x - chassis_pos.x;
+          let rel_y = ball_pos.y - chassis_pos.y;
+          let contact_vx = chassis_vel.x - chassis_angvel.z * rel_y;
+          let contact_vy = chassis_vel.y + chassis_angvel.z * rel_x;
+          let rel_ball_vx = ball_vel.x - contact_vx;
+          let rel_ball_vy = ball_vel.y - contact_vy;
+          let kicker_damp = robot_cfg.kicker_damp_factor as f32;
+          let vn = -(rel_ball_vx * dir_x + rel_ball_vy * dir_y) * kicker_damp;
 
-          // Kicking adds the configured launch velocity to the ball's current
-          // velocity, then the result is scaled down if it exceeds the safety
-          // limit. This preserves the combined direction instead of replacing
-          // the ball's existing motion.
-          let launch_velocity = PhysicsWorld::ball_speed_limited_velocity(Vector::new(
-            ball_vel.x + dir_x * speed_xy as f32,
-            ball_vel.y + dir_y * speed_xy as f32,
-            ball_vel.z + speed_z as f32,
-          ));
+          // The kicker plunger applies a normal impulse along the robot
+          // heading: the ball leaves at kick speed relative to the moving
+          // kicker contact point, plus a damped rebound of its incoming
+          // normal velocity. Sideways motion relative to the mouth is
+          // absorbed, so the ball launches straight where the robot points —
+          // matching real kicker hardware.
+          let desired_vx = contact_vx + dir_x * speed_xy as f32 + vn * dir_x;
+          let desired_vy = contact_vy + dir_y * speed_xy as f32 + vn * dir_y;
+          let desired_vz = speed_z as f32;
           let ball = &mut self.physics.rigid_body_set[ball_body];
-          ball.set_linvel(launch_velocity, true);
+          ball.set_linvel(Vector::new(desired_vx, desired_vy, desired_vz), true);
           ball.set_angvel(Vector::ZERO, true);
 
           sim.kick_type = if speed_z >= 1.0 {

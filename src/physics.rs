@@ -484,7 +484,6 @@ impl PhysicsWorld {
       &(),
     );
     self.sanitize_robot_motion();
-    self.clamp_ball_speed();
   }
 
   /// Apply ball rolling friction (matches grSim's ball friction model).
@@ -758,15 +757,9 @@ impl PhysicsWorld {
     self.ball_mass
   }
 
-  pub fn clamp_ball_speed(&mut self) {
-    let ball = &mut self.rigid_body_set[self.ball_body];
-    let linvel = ball.linvel();
-    let clamped_linvel = Self::ball_speed_limited_velocity(linvel);
-    if clamped_linvel != linvel {
-      ball.set_linvel(clamped_linvel, true);
-    }
-  }
-
+  /// Cap externally injected ball velocity (teleport). Regular gameplay is
+  /// never clamped — the excessive-ball-speed rule is enforced by the
+  /// autoref, not the physics.
   pub fn ball_speed_limited_velocity(velocity: Vector) -> Vector {
     clamp_velocity(&velocity, MAX_BALL_SPEED as f32)
   }
