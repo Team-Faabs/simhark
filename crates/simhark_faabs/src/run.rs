@@ -1,10 +1,10 @@
 use core_dump::proto::CpState;
-use simhark::{MoveCommand, RobotCommand, TeamColor, WorldCommand};
+use simhark::{DEFAULT_KICK_SPEED, MoveCommand, RobotCommand, TeamColor, WorldCommand};
 use tf_jetsoncode::{TeensySendMsg, send_flags};
 
 const HEADING_GAIN: f64 = 6.0;
 const MAX_ANGULAR: f64 = 20.0;
-const MAX_KICK_SPEED: f64 = 10.0;
+const MAX_KICK_SPEED: f64 = DEFAULT_KICK_SPEED;
 const CHIP_ANGLE_DEG: f64 = 45.0;
 
 pub fn run_sim_action(

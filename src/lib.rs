@@ -44,7 +44,9 @@ pub mod world;
 pub use command::{
   MoveCommand, RobotCommand, TeamCommand, TeleportBall, TeleportRobot, WorldCommand,
 };
-pub use config::{BallConfig, FieldConfig, RobotConfig, WorldConfig};
+pub use config::{
+  BallConfig, DEFAULT_KICK_SPEED, FieldConfig, MAX_BALL_SPEED, RobotConfig, WorldConfig,
+};
 pub use controller::{ControlledTeams, FnTeamController, NoopController, TeamController};
 pub use domain_randomization::{DomainRandomizer, RandomizationConfig};
 pub use engine::SimulationEngine;

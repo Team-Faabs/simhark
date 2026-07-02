@@ -77,6 +77,20 @@ fn test_division_b_smaller_field() {
   assert!(b.field_width < a.field_width);
 }
 
+#[test]
+fn test_default_kick_limits_stay_below_card_threshold() {
+  let config = WorldConfig::division_a();
+
+  assert_eq!(config.blue_robots.max_linear_kick_speed, DEFAULT_KICK_SPEED);
+  assert_eq!(config.blue_robots.max_chip_kick_speed, DEFAULT_KICK_SPEED);
+  assert_eq!(
+    config.yellow_robots.max_linear_kick_speed,
+    DEFAULT_KICK_SPEED
+  );
+  assert_eq!(config.yellow_robots.max_chip_kick_speed, DEFAULT_KICK_SPEED);
+  assert!(DEFAULT_KICK_SPEED <= 3.5);
+}
+
 // ============================================================================
 // Physics: ball behavior
 // ============================================================================
@@ -394,6 +408,30 @@ fn test_teleport_ball() {
 }
 
 #[test]
+fn test_teleport_ball_hard_caps_ball_speed() {
+  let mut world = World::new(0, WorldConfig::division_a());
+
+  world.step(&WorldCommand {
+    teleport_ball: Some(TeleportBall {
+      x: Some(0.0),
+      y: Some(0.0),
+      z: Some(0.0),
+      vx: Some(12.0),
+      vy: Some(0.0),
+      vz: Some(0.0),
+    }),
+    ..Default::default()
+  });
+
+  let state = world.get_state();
+  let speed = ball_speed(&state);
+  assert!(
+    speed <= MAX_BALL_SPEED + 1e-5,
+    "teleported ball should be capped at {MAX_BALL_SPEED}m/s, got {speed}"
+  );
+}
+
+#[test]
 fn test_teleport_robot() {
   let mut world = World::new(0, WorldConfig::division_a());
 
@@ -557,9 +595,63 @@ fn test_kick_contact_reenables_without_followup_command() {
 }
 
 #[test]
-fn test_flat_kick_inherits_kicker_contact_velocity() {
+fn test_flat_kick_hard_caps_ball_speed() {
   let mut config = WorldConfig::division_a();
   config.robots_per_team = 1;
+  config.blue_robots.max_linear_kick_speed = 20.0;
+  let mut world = World::new(0, config);
+  let robot_x = -3.0;
+  let robot_y = -3.0;
+
+  world.step(&WorldCommand {
+    teleport_ball: Some(TeleportBall {
+      x: Some(robot_x + world.config.blue_robots.center_from_kicker + world.config.ball.radius),
+      y: Some(robot_y),
+      z: Some(0.0),
+      vx: Some(0.0),
+      vy: Some(3.0),
+      vz: Some(0.0),
+    }),
+    teleport_robots: vec![TeleportRobot {
+      id: 0,
+      team: TeamColor::Blue,
+      x: Some(robot_x),
+      y: Some(robot_y),
+      orientation: Some(0.0),
+      vx: Some(0.0),
+      vy: Some(0.0),
+      v_angular: Some(0.0),
+      present: Some(true),
+    }],
+    blue: vec![RobotCommand {
+      id: 0,
+      move_command: None,
+      kick_speed: 20.0,
+      kick_angle: 0.0,
+      dribbler_on: true,
+    }],
+    ..Default::default()
+  });
+
+  let state = world.get_state();
+  let speed = ball_speed(&state);
+  assert!(
+    speed <= MAX_BALL_SPEED + 1e-5,
+    "flat kick should be capped at {MAX_BALL_SPEED}m/s, got {speed}"
+  );
+  let expected_angle = 3.0f64.atan2(20.0);
+  let launch_angle = state.ball.vy.atan2(state.ball.vx);
+  assert!(
+    (launch_angle - expected_angle).abs() < 0.03,
+    "flat kick should scale the summed ball/kick velocity direction, got {launch_angle} rad"
+  );
+}
+
+#[test]
+fn test_chip_kick_hard_caps_ball_speed() {
+  let mut config = WorldConfig::division_a();
+  config.robots_per_team = 1;
+  config.blue_robots.max_chip_kick_speed = 20.0;
   let mut world = World::new(0, config);
   let robot_x = -3.0;
   let robot_y = -3.0;
@@ -580,7 +672,53 @@ fn test_flat_kick_inherits_kicker_contact_velocity() {
       y: Some(robot_y),
       orientation: Some(0.0),
       vx: Some(0.0),
+      vy: Some(0.0),
+      v_angular: Some(0.0),
+      present: Some(true),
+    }],
+    blue: vec![RobotCommand {
+      id: 0,
+      move_command: None,
+      kick_speed: 20.0,
+      kick_angle: 45.0,
+      dribbler_on: true,
+    }],
+    ..Default::default()
+  });
+
+  let state = world.get_state();
+  let speed = ball_speed(&state);
+  assert!(
+    speed <= MAX_BALL_SPEED + 1e-5,
+    "chip kick should be capped at {MAX_BALL_SPEED}m/s, got {speed}"
+  );
+}
+
+#[test]
+fn test_flat_kick_adds_to_existing_ball_velocity() {
+  let mut config = WorldConfig::division_a();
+  config.robots_per_team = 1;
+  let mut world = World::new(0, config);
+  let robot_x = -3.0;
+  let robot_y = -3.0;
+
+  world.step(&WorldCommand {
+    teleport_ball: Some(TeleportBall {
+      x: Some(robot_x + world.config.blue_robots.center_from_kicker + world.config.ball.radius),
+      y: Some(robot_y),
+      z: Some(0.0),
+      vx: Some(0.0),
       vy: Some(1.0),
+      vz: Some(0.0),
+    }),
+    teleport_robots: vec![TeleportRobot {
+      id: 0,
+      team: TeamColor::Blue,
+      x: Some(robot_x),
+      y: Some(robot_y),
+      orientation: Some(0.0),
+      vx: Some(0.0),
+      vy: Some(0.0),
       v_angular: Some(0.0),
       present: Some(true),
     }],
@@ -602,7 +740,7 @@ fn test_flat_kick_inherits_kicker_contact_velocity() {
   );
   assert!(
     state.ball.vy > 0.5,
-    "flat kick should inherit sideways kicker velocity, vy={}",
+    "flat kick should preserve existing sideways ball velocity, vy={}",
     state.ball.vy
   );
 }
@@ -711,6 +849,11 @@ fn blue_infrared_for_ball_offset(config: &WorldConfig, ball_dx: f64, ball_dy: f6
   );
 
   world.get_state().blue_robots[0].infrared
+}
+
+fn ball_speed(state: &WorldState) -> f64 {
+  (state.ball.vx * state.ball.vx + state.ball.vy * state.ball.vy + state.ball.vz * state.ball.vz)
+    .sqrt()
 }
 
 #[test]

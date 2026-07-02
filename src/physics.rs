@@ -8,7 +8,9 @@
 use nalgebra::{Isometry3, SMatrix, SVector, Unit, UnitQuaternion, Vector3 as NVec3};
 use rapier3d::prelude::*;
 
-use crate::config::{BALL_COLLISION_SUBSTEPS, RobotConfig, WALL_COUNT, WHEEL_COUNT, WorldConfig};
+use crate::config::{
+  BALL_COLLISION_SUBSTEPS, MAX_BALL_SPEED, RobotConfig, WALL_COUNT, WHEEL_COUNT, WorldConfig,
+};
 use crate::geometry::deg2rad;
 
 // Collision group bits, mirroring grSim's per-surface collision setup.
@@ -482,6 +484,7 @@ impl PhysicsWorld {
       &(),
     );
     self.sanitize_robot_motion();
+    self.clamp_ball_speed();
   }
 
   /// Apply ball rolling friction (matches grSim's ball friction model).
@@ -755,6 +758,19 @@ impl PhysicsWorld {
     self.ball_mass
   }
 
+  pub fn clamp_ball_speed(&mut self) {
+    let ball = &mut self.rigid_body_set[self.ball_body];
+    let linvel = ball.linvel();
+    let clamped_linvel = Self::ball_speed_limited_velocity(linvel);
+    if clamped_linvel != linvel {
+      ball.set_linvel(clamped_linvel, true);
+    }
+  }
+
+  pub fn ball_speed_limited_velocity(velocity: Vector) -> Vector {
+    clamp_velocity(&velocity, MAX_BALL_SPEED as f32)
+  }
+
   pub fn is_robot_ball_contact_enabled(&self, robot: &RobotHandles) -> bool {
     self.collider_set[robot.dummy_collider].collision_groups() == dummy_groups()
       && self.collider_set[robot.kicker_collider].collision_groups() == kicker_groups()
@@ -772,6 +788,15 @@ fn clamp_planar_velocity(vec: &Vector, limit: f32) -> Vector {
   }
   let scale = limit / mag;
   Vector::new(vec.x * scale, vec.y * scale, vec.z)
+}
+
+fn clamp_velocity(vec: &Vector, limit: f32) -> Vector {
+  let mag = (vec.x * vec.x + vec.y * vec.y + vec.z * vec.z).sqrt();
+  if mag <= limit || mag <= f32::EPSILON {
+    return *vec;
+  }
+  let scale = limit / mag;
+  Vector::new(vec.x * scale, vec.y * scale, vec.z * scale)
 }
 
 fn clamp_robot_velocity(body: &mut RigidBody, params: DriveParams) {

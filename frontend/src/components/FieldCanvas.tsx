@@ -109,6 +109,7 @@ export default function FieldCanvas({
     ];
 
     drawFieldLines(ctx, toCanvas, scale, field);
+    drawCoordinateGuides(ctx, toCanvas, scale, field, w, h);
 
     const visibleStates = snapshot.states?.length ? snapshot.states : [snapshot.state];
     const worldOpacity = visibleStates.length > 1 ? 0.55 : 1;
@@ -301,6 +302,196 @@ function drawFieldLines(
   drawGlowRect(glx, gly, goalW, goalH);
   const [grx, gry] = toCanvas(fieldLength / 2, field.goal_width / 2);
   drawGlowRect(grx, gry, goalW, goalH);
+}
+
+function drawCoordinateGuides(
+  ctx: CanvasRenderingContext2D,
+  toCanvas: (x: number, y: number) => [number, number],
+  scale: number,
+  field: FieldConfig,
+  w: number,
+  h: number
+) {
+  const fieldLength = field.field_length;
+  const fieldWidth = field.field_width;
+  const halfX = fieldLength / 2;
+  const halfY = fieldWidth / 2;
+  const labelColor = "rgba(226, 232, 240, 0.74)";
+  const tickColor = "rgba(226, 232, 240, 0.46)";
+  const axisColor = "rgba(56, 189, 248, 0.42)";
+  const majorStep = chooseGuideStep(fieldLength, scale);
+  const minorStep = majorStep / 2;
+
+  ctx.save();
+  ctx.font = '10px "JetBrains Mono", monospace';
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  const [left, top] = toCanvas(-halfX, halfY);
+  const [right, bottom] = toCanvas(halfX, -halfY);
+  const [, centerY] = toCanvas(0, 0);
+  const [centerX] = toCanvas(0, 0);
+
+  ctx.strokeStyle = axisColor;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 7]);
+  ctx.beginPath();
+  ctx.moveTo(left, centerY);
+  ctx.lineTo(right, centerY);
+  ctx.moveTo(centerX, top);
+  ctx.lineTo(centerX, bottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = tickColor;
+  ctx.lineWidth = 1;
+  for (
+    let x = Math.ceil(-halfX / minorStep) * minorStep;
+    x <= halfX + 1e-6;
+    x += minorStep
+  ) {
+    const isMajor = isMultipleOfStep(x, majorStep);
+    const [px] = toCanvas(x, 0);
+    const tick = isMajor ? 7 : 4;
+    ctx.beginPath();
+    ctx.moveTo(px, bottom + 2);
+    ctx.lineTo(px, bottom + 2 + tick);
+    ctx.moveTo(px, top - 2);
+    ctx.lineTo(px, top - 2 - tick);
+    ctx.stroke();
+
+    if (isMajor) {
+      ctx.fillStyle = labelColor;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(formatGuideNumber(x), px, Math.min(h - 16, bottom + 12));
+    }
+  }
+
+  for (
+    let y = Math.ceil(-halfY / minorStep) * minorStep;
+    y <= halfY + 1e-6;
+    y += minorStep
+  ) {
+    const isMajor = isMultipleOfStep(y, majorStep);
+    const [, py] = toCanvas(0, y);
+    const tick = isMajor ? 7 : 4;
+    ctx.beginPath();
+    ctx.moveTo(left - 2, py);
+    ctx.lineTo(left - 2 - tick, py);
+    ctx.moveTo(right + 2, py);
+    ctx.lineTo(right + 2 + tick, py);
+    ctx.stroke();
+
+    if (isMajor) {
+      ctx.fillStyle = labelColor;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatGuideNumber(y), Math.max(16, left - 12), py);
+    }
+  }
+
+  ctx.fillStyle = labelColor;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("x/y meters", Math.max(10, left), Math.min(h - 18, bottom + 28));
+
+  drawAngleCompass(ctx, w, h);
+  ctx.restore();
+}
+
+function drawAngleCompass(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const radius = Math.min(38, Math.max(28, Math.min(w, h) * 0.055));
+  const cx = w - PADDING - radius - 10;
+  const cy = PADDING + radius + 8;
+  if (cx < radius + 12 || cy < radius + 12) return;
+
+  ctx.save();
+  ctx.fillStyle = "rgba(2, 6, 23, 0.48)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.38)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius + 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(226, 232, 240, 0.54)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const directions = [
+    { degrees: 0, label: "0°" },
+    { degrees: 90, label: "90°" },
+    { degrees: 180, label: "180°" },
+    { degrees: 270, label: "270°" },
+  ];
+
+  ctx.font = '10px "JetBrains Mono", monospace';
+  for (const direction of directions) {
+    const angle = (direction.degrees * Math.PI) / 180;
+    const dx = Math.cos(angle);
+    const dy = -Math.sin(angle);
+    const tipX = cx + dx * radius;
+    const tipY = cy + dy * radius;
+
+    ctx.strokeStyle =
+      direction.degrees === 0 ? "rgba(34, 211, 238, 0.9)" : "rgba(226, 232, 240, 0.58)";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = direction.degrees === 0 ? 2 : 1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, direction.degrees === 0 ? 3.2 : 2.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(226, 232, 240, 0.86)";
+    ctx.textAlign =
+      direction.degrees === 0
+        ? "left"
+        : direction.degrees === 180
+          ? "right"
+          : "center";
+    ctx.textBaseline =
+      direction.degrees === 90
+        ? "bottom"
+        : direction.degrees === 270
+          ? "top"
+          : "middle";
+    ctx.fillText(
+      direction.label,
+      cx + dx * (radius + 8),
+      cy + dy * (radius + 8)
+    );
+  }
+
+  ctx.fillStyle = "rgba(148, 163, 184, 0.76)";
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("angle", cx, cy);
+  ctx.restore();
+}
+
+function chooseGuideStep(fieldLength: number, scale: number): number {
+  const minimumLabelSpacingPx = 44;
+  const candidates = [0.5, 1, 2, 5];
+  return (
+    candidates.find((candidate) => candidate * scale >= minimumLabelSpacingPx) ??
+    Math.max(1, Math.ceil(fieldLength / 8))
+  );
+}
+
+function isMultipleOfStep(value: number, step: number): boolean {
+  return Math.abs(value / step - Math.round(value / step)) < 1e-6;
+}
+
+function formatGuideNumber(value: number): string {
+  const rounded = Math.abs(value) < 1e-6 ? 0 : value;
+  return Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1);
 }
 
 function drawBallTrajectory(
@@ -502,6 +693,17 @@ function drawHoloRobot(
   ctx.strokeText(label, x, y);
   ctx.fillStyle = "#ffffff";
   ctx.fillText(label, x, y);
+
+  if (overlay.label) {
+    const text = `${overlay.team[0]}${overlay.id} ${overlay.label}`;
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.textBaseline = "top";
+    ctx.strokeStyle = "rgba(2, 6, 23, 0.85)";
+    ctx.lineWidth = 3;
+    ctx.strokeText(text, x, y + r + 5);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(text, x, y + r + 5);
+  }
   ctx.restore();
 }
 

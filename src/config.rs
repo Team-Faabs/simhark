@@ -19,6 +19,12 @@ pub const WALL_COUNT: usize = 10;
 /// Ball collision sub-steps (grSim uses 5).
 pub const BALL_COLLISION_SUBSTEPS: usize = 5;
 
+/// RoboCup SSL ball speed safety limit.
+pub const MAX_BALL_SPEED: f64 = 10.0;
+
+/// Default kick/chip launch speed. This stays below the card threshold.
+pub const DEFAULT_KICK_SPEED: f64 = 3.5;
+
 /// Complete world configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldConfig {
@@ -220,8 +226,8 @@ impl Default for RobotConfig {
       wheel_tangent_friction: 0.8,
       wheel_perpendicular_friction: 0.05,
       wheel_motor_fmax: 0.2,
-      max_linear_kick_speed: 10.0,
-      max_chip_kick_speed: 10.0,
+      max_linear_kick_speed: DEFAULT_KICK_SPEED,
+      max_chip_kick_speed: DEFAULT_KICK_SPEED,
       acc_speedup_absolute_max: 4.0,
       acc_speedup_angular_max: 50.0,
       acc_brake_absolute_max: 4.0,

@@ -113,20 +113,20 @@ function strategyClass(big: boolean): string {
 
 function robotsClass(big: boolean): string {
   return big
-    ? "grid flex-1 min-h-0 gap-1.5 overflow-hidden [grid-template-columns:repeat(auto-fit,minmax(230px,1fr))] auto-rows-fr"
+    ? "grid flex-1 min-h-0 content-start gap-1.5 overflow-y-auto overflow-x-hidden pr-0.5 [grid-template-columns:repeat(auto-fit,minmax(230px,1fr))] auto-rows-min"
     : "space-y-1.5 max-h-72 overflow-y-auto pr-0.5";
 }
 
 function robotCardClass(big: boolean): string {
   return [
     "rounded-lg bg-slate-900/40 border border-slate-700/30 px-2.5 min-w-0",
-    big ? "py-1.5 min-h-0 overflow-hidden" : "py-2",
+    big ? "py-1.5 min-h-0" : "py-2",
   ].join(" ");
 }
 
 function messageClass(big: boolean): string {
   return big
-    ? "mt-1 text-[10px] leading-snug text-slate-400 break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]"
+    ? "mt-1 text-[10px] leading-snug text-slate-400 break-words"
     : "mt-1.5 text-[11px] leading-snug text-slate-400 break-words";
 }
 

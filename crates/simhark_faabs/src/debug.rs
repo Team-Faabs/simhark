@@ -44,29 +44,11 @@ pub fn robot_debug_overlays(
 ) -> Vec<DebugOverlay> {
   let color = debug_color(ai_command, command);
   match CpTask::try_from(command.task).ok() {
-    Some(CpTask::TaskPos) => command
-      .pos
-      .as_ref()
-      .map(|pos| {
-        vec![DebugOverlay::HoloRobot(DebugHoloRobot {
-          team,
-          id: id as usize,
-          x: pos.x as f64 / 1000.0,
-          y: pos.y as f64 / 1000.0,
-          orientation: command
-            .orientation
-            .map(|orientation| (orientation as f64).to_radians()),
-          color,
-          label: Some(
-            ai_command
-              .map(ai_task_label)
-              .unwrap_or_else(|| "target".to_string()),
-          ),
-        })]
-      })
-      .unwrap_or_default(),
+    Some(CpTask::TaskPos) => target_overlay(id, team, ai_command, command, color)
+      .into_iter()
+      .collect(),
     Some(CpTask::TaskKick) | Some(CpTask::TaskChip) | Some(CpTask::TaskRecKick) => {
-      kick_line_angle(id, team, ai_command, command, state)
+      let mut overlays = kick_line_angle(id, team, ai_command, command, state)
         .map(|angle| {
           vec![DebugOverlay::KickLine(DebugKickLine {
             team,
@@ -74,7 +56,7 @@ pub fn robot_debug_overlays(
             from_x: state.ball.x,
             from_y: state.ball.y,
             angle,
-            color,
+            color: color.clone(),
             label: Some(
               ai_command
                 .map(ai_task_label)
@@ -82,10 +64,45 @@ pub fn robot_debug_overlays(
             ),
           })]
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+      if matches!(ai_command, Some(AiRobotCommand::RecPass)) {
+        if let Some(target) = target_overlay(id, team, ai_command, command, color) {
+          overlays.push(target);
+        }
+      }
+
+      overlays
     }
     _ => Vec::new(),
   }
+}
+
+fn target_overlay(
+  id: u32,
+  team: TeamColor,
+  ai_command: Option<AiRobotCommand>,
+  command: &CpCommand,
+  color: String,
+) -> Option<DebugOverlay> {
+  let pos = command.pos.as_ref()?;
+  let label = match ai_command {
+    Some(AiRobotCommand::RecPass) => "AI RecPass target".to_string(),
+    Some(command) => ai_task_label(command),
+    None => "target".to_string(),
+  };
+
+  Some(DebugOverlay::HoloRobot(DebugHoloRobot {
+    team,
+    id: id as usize,
+    x: pos.x as f64 / 1000.0,
+    y: pos.y as f64 / 1000.0,
+    orientation: command
+      .orientation
+      .map(|orientation| (orientation as f64).to_radians()),
+    color,
+    label: Some(label),
+  }))
 }
 
 fn kick_line_angle(
