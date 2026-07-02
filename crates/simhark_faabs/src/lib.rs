@@ -1,6 +1,8 @@
 mod conv;
 #[cfg(feature = "viewer-debug")]
 mod debug;
+#[cfg(feature = "ssl_game_controller")]
+pub mod game_controller;
 #[cfg(feature = "interface")]
 mod interface;
 mod run;
@@ -21,12 +23,21 @@ use std::mem;
 use std::net::Ipv4Addr;
 use tf_jetsoncode::Robot;
 
+#[cfg(feature = "ssl_game_controller")]
+pub type FaabsCommunication = game_controller::GameControllerCommunication;
+#[cfg(not(feature = "ssl_game_controller"))]
+pub type FaabsCommunication = ();
+
 pub struct Faabs<A: Ai = DummyAi> {
   pub robots: Vec<Robot<()>>,
-  pub crash_pilot: CrashPilot<(), A>,
+  pub crash_pilot: CrashPilot<FaabsCommunication, A>,
   pub feedback_robot: u32,
   pub team: TeamColor,
   pub events: crashpilot::Events,
+  #[cfg(feature = "ssl_game_controller")]
+  pub game_controller: crashpilot::SslGameController,
+  #[cfg(feature = "ssl_game_controller")]
+  game_controller_events: crashpilot::communication::EventShare,
   #[cfg(feature = "viewer-debug")]
   latest_debug: Option<simhark::viewer::ViewerDebugSnapshot>,
   #[cfg(feature = "interface")]
@@ -71,11 +82,24 @@ impl<A: Ai + Send> Faabs<A> {
       robots.push(Robot::new(config));
     }
 
+    let cp_config = get_config(num_robots);
+    #[cfg(feature = "ssl_game_controller")]
+    let game_controller_events = game_controller::event_share();
+    #[cfg(feature = "ssl_game_controller")]
+    let comm = game_controller::GameControllerCommunication::spawn(
+      &cp_config,
+      game_controller_events.clone(),
+    );
+    #[cfg(feature = "ssl_game_controller")]
+    let game_controller = comm.controller().clone();
+    #[cfg(not(feature = "ssl_game_controller"))]
+    let comm = ();
+
     Self {
       robots,
       crash_pilot: CrashPilot::from_parts(
-        get_config(num_robots),
-        (),
+        cp_config,
+        comm,
         ai,
         RobotHeartbeat::default(),
         std::time::Instant::now(),
@@ -83,6 +107,10 @@ impl<A: Ai + Send> Faabs<A> {
       feedback_robot: 0,
       team,
       events: crashpilot::Events::default(),
+      #[cfg(feature = "ssl_game_controller")]
+      game_controller,
+      #[cfg(feature = "ssl_game_controller")]
+      game_controller_events,
       #[cfg(feature = "viewer-debug")]
       latest_debug: None,
       #[cfg(feature = "interface")]
@@ -109,6 +137,9 @@ impl<A: Ai + Send> Faabs<A> {
     if self.events.ws.is_none() {
       self.events.ws = Some(interface_command(self.team));
     }
+
+    #[cfg(feature = "ssl_game_controller")]
+    self.drain_game_controller_events();
 
     let ws = self.events.ws.clone();
     #[cfg(feature = "viewer-debug")]
@@ -190,9 +221,36 @@ impl<A: Ai + Send> Faabs<A> {
   pub fn debug_snapshot(&self) -> Option<simhark::viewer::ViewerDebugSnapshot> {
     self.latest_debug.clone()
   }
+
+  #[cfg(feature = "ssl_game_controller")]
+  fn drain_game_controller_events(&mut self) {
+    let Ok(mut pending) = self.game_controller_events.try_write() else {
+      return;
+    };
+
+    let mut events = pending.take();
+    if events.gc.is_some() {
+      self.events.gc = events.gc.take();
+    }
+    self
+      .events
+      .gc_team_messages
+      .append(&mut events.gc_team_messages);
+  }
 }
 
 fn get_config(num_robots: u8) -> crashpilot::Config {
+  let mut config =
+    crashpilot::config::load_or_create_config(concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml"))
+      .unwrap_or_else(|err| {
+        eprintln!("Failed to load simhark_faabs config.toml, using defaults: {err}");
+        crashpilot::Config {
+          ssl: SslConfig::default(),
+          server: ServerConfig::default(),
+          logging: LoggingConfig::default(),
+          robots: HashMap::new(),
+        }
+      });
   let mut robots = HashMap::new();
 
   for i in 0..num_robots as u32 {
@@ -205,10 +263,6 @@ fn get_config(num_robots: u8) -> crashpilot::Config {
     );
   }
 
-  crashpilot::Config {
-    ssl: SslConfig::default(),
-    server: ServerConfig::default(),
-    logging: LoggingConfig::default(),
-    robots,
-  }
+  config.robots = robots;
+  config
 }

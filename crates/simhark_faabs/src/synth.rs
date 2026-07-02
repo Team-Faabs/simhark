@@ -19,6 +19,8 @@ pub fn interface_command(team: TeamColor) -> InterfaceWrapperCp {
   InterfaceWrapperCp {
     robot_commands: Vec::new(),
     interface_command: InterfaceCommandCp {
+      team_color,
+      side,
       mode: CpMode::ModeGame as i32,
       manual: InterfaceManualCp {
         ball_tracked: true,
@@ -26,8 +28,6 @@ pub fn interface_command(team: TeamColor) -> InterfaceWrapperCp {
       },
       game: InterfaceGameCp {
         running: true,
-        side,
-        team_color,
         goalkeeper_id: 0,
         max_speed: 0,
       },
@@ -45,7 +45,7 @@ mod tests {
     let yellow = interface_command(TeamColor::Yellow);
     let blue = interface_command(TeamColor::Blue);
 
-    assert!(!yellow.interface_command.game.team_color);
-    assert!(blue.interface_command.game.team_color);
+    assert!(!yellow.interface_command.team_color);
+    assert!(blue.interface_command.team_color);
   }
 }
