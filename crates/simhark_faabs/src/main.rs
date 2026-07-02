@@ -5,7 +5,7 @@ use simhark_faabs::Faabs;
 use std::thread;
 
 fn main() {
-  #[cfg(feature = "viewer")]
+  #[cfg(any(feature = "viewer", feature = "interface"))]
   tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()
@@ -14,7 +14,7 @@ fn main() {
       tokio::task::spawn_blocking(run).await.unwrap();
     });
 
-  #[cfg(not(feature = "viewer"))]
+  #[cfg(not(all(feature = "viewer", feature = "interface")))]
   run()
 }
 
