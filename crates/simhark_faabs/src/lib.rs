@@ -12,7 +12,6 @@ use crate::conv::world_state_to_cp_events;
 #[cfg(feature = "interface")]
 use crate::interface::EventShare;
 pub use crate::run::run_sim_action;
-use crate::synth::interface_command;
 use core_dump::types::{Ai, DummyAi};
 use crashpilot::CrashPilot;
 use crashpilot::communication::RobotHeartbeat;
@@ -22,6 +21,8 @@ use std::collections::HashMap;
 use std::mem;
 use std::net::Ipv4Addr;
 use tf_jetsoncode::Robot;
+
+pub use crashpilot;
 
 #[cfg(feature = "ssl_game_controller")]
 pub type FaabsCommunication = game_controller::GameControllerCommunication;
@@ -132,10 +133,6 @@ impl<A: Ai + Send> Faabs<A> {
     #[cfg(feature = "interface")]
     {
       self.events.ws = self.interface.blocking_lock().clone();
-    }
-
-    if self.events.ws.is_none() {
-      self.events.ws = Some(interface_command(self.team));
     }
 
     #[cfg(feature = "ssl_game_controller")]
@@ -258,6 +255,7 @@ fn get_config(num_robots: u8) -> crashpilot::Config {
       i,
       RobotConfig {
         ip: Ipv4Addr::new(10, 0, 64, 101 + i as u8),
+        port: None,
         substitution_pos: Default::default(),
       },
     );

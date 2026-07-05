@@ -261,7 +261,7 @@ export function useViewerSocket(wsPort: number) {
     }
   }, []);
 
-  const stepReplay = useCallback((delta: -1 | 1) => {
+  const stepReplay = useCallback((delta: number) => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(`replay:step:${delta}`);

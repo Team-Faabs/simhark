@@ -74,12 +74,12 @@ export default function App() {
       if (target && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
       if (event.code === "Comma" || event.code === "ArrowLeft") {
         event.preventDefault();
-        stepReplay(-1);
+        stepReplay(-replayStepSize(event));
         return;
       }
       if (event.code === "Period" || event.code === "ArrowRight") {
         event.preventDefault();
-        stepReplay(1);
+        stepReplay(replayStepSize(event));
         return;
       }
       if (event.code !== "Space" || event.repeat) return;
@@ -194,6 +194,12 @@ export default function App() {
       </div>
     </AppShell>
   );
+}
+
+function replayStepSize(event: KeyboardEvent): number {
+  if (event.ctrlKey) return 100;
+  if (event.shiftKey) return 10;
+  return 1;
 }
 
 function AppShell({
