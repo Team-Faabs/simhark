@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { useViewerSocket } from "./hooks/useViewerSocket";
 import FieldCanvas from "./components/FieldCanvas";
@@ -7,6 +8,7 @@ import WorldSelector from "./components/WorldSelector";
 import ControlPanel from "./components/ControlPanel";
 import TestPanel from "./components/TestPanel";
 import DebugPanel from "./components/DebugPanel";
+import ReplayPanel from "./components/ReplayPanel";
 
 declare global {
   interface Window {
@@ -54,11 +56,70 @@ export default function App() {
   const wsPort = resolveWsPort();
   const route = resolveViewerRoute();
   const debugTeam = resolveDebugTeamFilter();
-  const { frame, connected, selectWorld, selectWorlds, sendControl, setSpeed } =
+  const { frame, connected, selectWorld, selectWorlds, sendControl, setSpeed, stepReplay } =
     useViewerSocket(wsPort);
   const control = frame?.control ?? { web_enabled: false, running: true, speed: 1 };
   const selectedWorlds = frame?.selected_worlds ?? [frame?.selected_world ?? 0];
   const showDebug = route !== "default";
+  const spaceHoldRef = useRef<{
+    startedAt: number;
+    wasRunning: boolean;
+    restoreSpeed: number | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!frame?.replay?.enabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
+      if (event.code === "Comma" || event.code === "ArrowLeft") {
+        event.preventDefault();
+        stepReplay(-1);
+        return;
+      }
+      if (event.code === "Period" || event.code === "ArrowRight") {
+        event.preventDefault();
+        stepReplay(1);
+        return;
+      }
+      if (event.code !== "Space" || event.repeat) return;
+      event.preventDefault();
+      if (control.running) {
+        spaceHoldRef.current = {
+          startedAt: performance.now(),
+          wasRunning: true,
+          restoreSpeed: control.speed,
+        };
+        setSpeed(Math.min(4, Math.max(0.1, control.speed * 2)));
+        return;
+      }
+      spaceHoldRef.current = {
+        startedAt: performance.now(),
+        wasRunning: false,
+        restoreSpeed: null,
+      };
+      sendControl("start");
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") return;
+      const hold = spaceHoldRef.current;
+      spaceHoldRef.current = null;
+      if (!hold) return;
+      event.preventDefault();
+      if (hold.wasRunning) {
+        if (hold.restoreSpeed !== null) setSpeed(hold.restoreSpeed);
+        if (performance.now() - hold.startedAt < 180) {
+          sendControl("pause");
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [frame?.replay?.enabled, control.running, control.speed, sendControl, setSpeed, stepReplay]);
 
   if (route === "debug-big") {
     return (
@@ -72,6 +133,8 @@ export default function App() {
             />
           </div>
           <div className="min-w-0 glass-panel panel-accent overflow-hidden flex flex-col">
+            <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+            <ReplayPanel replay={frame?.replay ?? null} events={frame?.events ?? []} />
             <div className="shrink-0 grid grid-cols-2 border-b border-slate-700/30">
               <GameStatePanel
                 gameState={frame?.game_state ?? null}
@@ -107,6 +170,7 @@ export default function App() {
 
         <div className="w-88 shrink-0 glass-panel panel-accent flex flex-col overflow-y-auto overflow-x-hidden">
           <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+          <ReplayPanel replay={frame?.replay ?? null} events={frame?.events ?? []} />
           <WorldSelector
             worldCount={frame?.world_count ?? 0}
             selected={selectedWorlds}

@@ -80,6 +80,29 @@ export interface ControlSnapshot {
   speed: number;
 }
 
+export interface ReplayStatus {
+  enabled: boolean;
+  frame_index: number;
+  frame_count: number;
+  base_speed: number;
+}
+
+export interface ReplayEvent {
+  frame: number;
+  sim_time: number;
+  world_id: number | null;
+  kind: "goal_blue" | "goal_yellow" | "foul" | "referee" | "custom";
+  label: string;
+  details: string | null;
+}
+
+export interface RobotInputInfo {
+  world_id: number;
+  team: "Blue" | "Yellow";
+  id: number;
+  input: string;
+}
+
 export interface TestStatus {
   world_id: number;
   path: string[];
@@ -148,6 +171,9 @@ export interface ViewerFrame {
   test_suite: TestSuiteSnapshot | null;
   goals: GoalSummary;
   control: ControlSnapshot;
+  replay: ReplayStatus;
+  events: ReplayEvent[];
+  robot_inputs: RobotInputInfo[];
   debug?: ViewerDebugSnapshot | null;
 }
 
@@ -235,5 +261,12 @@ export function useViewerSocket(wsPort: number) {
     }
   }, []);
 
-  return { frame, connected, selectWorld, selectWorlds, sendControl, setSpeed };
+  const stepReplay = useCallback((delta: -1 | 1) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(`replay:step:${delta}`);
+    }
+  }, []);
+
+  return { frame, connected, selectWorld, selectWorlds, sendControl, setSpeed, stepReplay };
 }

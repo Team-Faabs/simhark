@@ -1,8 +1,10 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
+import type { PointerEvent } from "react";
 import type {
   BallTrajectory,
   FieldConfig,
   DebugOverlay,
+  RobotInputInfo,
   RobotDebugInfo,
   RobotState,
   ViewerDebugSnapshot,
@@ -40,6 +42,16 @@ const WORLD_COLORS = [
 ];
 
 type WorldTint = (typeof WORLD_COLORS)[number];
+type RobotHitTarget = {
+  x: number;
+  y: number;
+  radius: number;
+  worldId: number;
+  team: "Blue" | "Yellow";
+  id: number;
+  input: string | null;
+};
+type RobotHover = RobotHitTarget & { mouseX: number; mouseY: number };
 
 export default function FieldCanvas({
   frame,
@@ -49,6 +61,8 @@ export default function FieldCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<ViewerFrame | null>(frame);
+  const hitTargetsRef = useRef<RobotHitTarget[]>([]);
+  const [hover, setHover] = useState<RobotHover | null>(null);
 
   // Keep latest frame in a ref so the resize observer can redraw without
   // re-binding.
@@ -77,6 +91,7 @@ export default function FieldCanvas({
     ctx.fillRect(0, 0, w, h);
 
     const snapshot = frameRef.current;
+    hitTargetsRef.current = [];
     if (!snapshot) {
       ctx.fillStyle = "#475569";
       ctx.font = '14px "Inter", system-ui';
@@ -114,6 +129,7 @@ export default function FieldCanvas({
     const visibleStates = snapshot.states?.length ? snapshot.states : [snapshot.state];
     const worldOpacity = visibleStates.length > 1 ? 0.55 : 1;
     const debugSnapshot = snapshot.debug ?? null;
+    const inputLookup = robotInputLookup(snapshot.robot_inputs ?? []);
     const debugRobots =
       visibleStates.length === 1
         ? robotDebugLookup(debugSnapshot, debugTeamFilter)
@@ -143,6 +159,20 @@ export default function FieldCanvas({
           BLUE_COLOR,
           debug?.color
         );
+        const [x, y] = toCanvas(robot.x, robot.y);
+        hitTargetsRef.current.push({
+          x,
+          y,
+          radius: Math.max(robotRadius * scale, 8),
+          worldId: state.world_id,
+          team: robot.team,
+          id: robot.id,
+          input:
+            debug?.message ??
+            debug?.task ??
+            inputLookup.get(robotInputKey(state.world_id, robot.team, robot.id)) ??
+            null,
+        });
       }
       for (const robot of state.yellow_robots) {
         if (!robot.is_on) continue;
@@ -157,6 +187,20 @@ export default function FieldCanvas({
           YELLOW_COLOR,
           debug?.color
         );
+        const [x, y] = toCanvas(robot.x, robot.y);
+        hitTargetsRef.current.push({
+          x,
+          y,
+          radius: Math.max(robotRadius * scale, 8),
+          worldId: state.world_id,
+          team: robot.team,
+          id: robot.id,
+          input:
+            debug?.message ??
+            debug?.task ??
+            inputLookup.get(robotInputKey(state.world_id, robot.team, robot.id)) ??
+            null,
+        });
       }
 
       drawBall(ctx, toCanvas, scale, ballRadius, state.ball, tint);
@@ -186,11 +230,62 @@ export default function FieldCanvas({
     return () => observer.disconnect();
   }, [draw]);
 
+  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+    let target: RobotHitTarget | null = null;
+    for (let index = hitTargetsRef.current.length - 1; index >= 0; index -= 1) {
+      const candidate = hitTargetsRef.current[index];
+      if (Math.hypot(candidate.x - mouseX, candidate.y - mouseY) <= candidate.radius + 6) {
+        target = candidate;
+        break;
+      }
+    }
+    setHover(target ? { ...target, mouseX, mouseY } : null);
+  }, []);
+
   return (
-    <div ref={containerRef} className="w-full h-full relative">
+    <div
+      ref={containerRef}
+      className="w-full h-full relative"
+      onPointerMove={handlePointerMove}
+      onPointerLeave={() => setHover(null)}
+    >
       <canvas ref={canvasRef} className="absolute inset-0" />
+      {hover && (
+        <div
+          className="pointer-events-none absolute z-10 max-w-96 rounded-md border border-slate-600/70 bg-slate-950/92 px-2.5 py-2 text-[11px] text-slate-100 shadow-xl"
+          style={{
+            left: Math.min(hover.mouseX + 14, Math.max(12, (containerRef.current?.clientWidth ?? 0) - 340)),
+            top: Math.min(hover.mouseY + 14, Math.max(12, (containerRef.current?.clientHeight ?? 0) - 120)),
+          }}
+        >
+          <div className="mb-1 flex items-center gap-2 font-mono text-[10px]">
+            <span className={hover.team === "Blue" ? "text-blue-300" : "text-amber-300"}>
+              {hover.team} {hover.id}
+            </span>
+            <span className="text-slate-500">world {hover.worldId}</span>
+          </div>
+          <div className="max-h-24 overflow-hidden break-words font-mono leading-snug text-slate-300">
+            {hover.input ?? "No recorded input for this robot in this frame"}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function robotInputLookup(inputs: RobotInputInfo[]): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const input of inputs) {
+    lookup.set(robotInputKey(input.world_id, input.team, input.id), input.input);
+  }
+  return lookup;
+}
+
+function robotInputKey(worldId: number, team: "Blue" | "Yellow", id: number): string {
+  return `${worldId}:${team}:${id}`;
 }
 
 function drawField(

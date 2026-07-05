@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Error, Result};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -15,6 +15,10 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tungstenite::{Message, accept};
 
 use crate::config::{FieldConfig, WorldConfig};
+use crate::replay::{
+  ReplayDebugOverlay, ReplayDebugSnapshot, ReplayEvent, ReplayFrame, RobotInputInfo,
+  robot_inputs_for_frame,
+};
 #[cfg(feature = "viewer-debug")]
 use crate::state::TeamColor;
 use crate::state::WorldState;
@@ -169,6 +173,7 @@ struct WebControlState {
   restart_requested: AtomicBool,
   stop_requested: AtomicBool,
   speed_percent: AtomicUsize,
+  frame_step_requested: AtomicIsize,
 }
 
 #[derive(Serialize)]
@@ -176,6 +181,14 @@ struct ControlSnapshot {
   web_enabled: bool,
   running: bool,
   speed: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayStatus {
+  pub enabled: bool,
+  pub frame_index: usize,
+  pub frame_count: usize,
+  pub base_speed: f64,
 }
 
 #[derive(Default)]
@@ -257,6 +270,9 @@ struct ViewerFrame<'a> {
   test_suite: Option<Value>,
   goals: GoalSummary,
   control: ControlSnapshot,
+  replay: ReplayStatus,
+  events: Vec<ReplayEvent>,
+  robot_inputs: Vec<RobotInputInfo>,
   #[cfg(feature = "viewer-debug")]
   debug: Option<ViewerDebugSnapshot>,
 }
@@ -360,6 +376,10 @@ impl ViewerServer {
 
   pub fn take_stop_request(&self) -> bool {
     self.control.stop_requested.swap(false, Ordering::Relaxed)
+  }
+
+  pub fn take_frame_step_request(&self) -> isize {
+    self.control.frame_step_requested.swap(0, Ordering::Relaxed)
   }
 
   pub fn speed(&self) -> f64 {
@@ -512,6 +532,92 @@ impl ViewerServer {
         running: self.control.running.load(Ordering::Relaxed),
         speed: self.speed(),
       },
+      replay: ReplayStatus {
+        enabled: false,
+        frame_index: 0,
+        frame_count: 0,
+        base_speed: 1.0,
+      },
+      events: Vec::new(),
+      robot_inputs: Vec::new(),
+      #[cfg(feature = "viewer-debug")]
+      debug,
+    };
+
+    if let Ok(json) = serde_json::to_string(&frame) {
+      *self.latest_frame.lock() = Some(json);
+    }
+  }
+
+  pub fn publish_replay_frame(
+    &self,
+    replay_frame: &ReplayFrame,
+    frame_index: usize,
+    frame_count: usize,
+    timeline: &[ReplayEvent],
+    base_speed: f64,
+  ) {
+    let Some(state) = selected_state(&replay_frame.states, self.selected_world()) else {
+      return;
+    };
+    let selected_worlds = selected_worlds_snapshot(&self.selected_worlds, self.world_count);
+    let selected_states = selected_worlds
+      .iter()
+      .filter_map(|world| state_by_world_id(&replay_frame.states, *world))
+      .collect::<Vec<_>>();
+    let mut goal_guard = self.goal_tracker.lock();
+    goal_guard.observe(state);
+    let game_state_guard = self.game_state.lock();
+    let test_suite = self.test_suite.lock().clone();
+    #[cfg(feature = "viewer-debug")]
+    let debug = self
+      .debug
+      .lock()
+      .get(&state.world_id)
+      .cloned()
+      .or_else(|| replay_frame_debug_snapshot(state.world_id, replay_frame));
+    let robot_inputs = replay_robot_inputs(replay_frame);
+    let frame = ViewerFrame {
+      world_count: self.world_count,
+      selected_world: self.selected_world(),
+      selected_worlds,
+      field: &self.field,
+      robot_radius: self.robot_radius,
+      ball_radius: self.ball_radius,
+      ball_trajectory: predicted_ball_trajectory(
+        state,
+        &self.field,
+        self.ball_radius,
+        self.ball_friction,
+        self.gravity,
+      ),
+      state,
+      states: if selected_states.is_empty() {
+        vec![state]
+      } else {
+        selected_states
+      },
+      game_state: game_state_guard.snapshot(),
+      test_suite,
+      goals: GoalSummary {
+        blue: goal_guard.blue,
+        yellow: goal_guard.yellow,
+        blue_active: state.goal_blue,
+        yellow_active: state.goal_yellow,
+      },
+      control: ControlSnapshot {
+        web_enabled: self.control.enabled.load(Ordering::Relaxed),
+        running: self.control.running.load(Ordering::Relaxed),
+        speed: self.speed(),
+      },
+      replay: ReplayStatus {
+        enabled: true,
+        frame_index,
+        frame_count,
+        base_speed,
+      },
+      events: timeline.to_vec(),
+      robot_inputs,
       #[cfg(feature = "viewer-debug")]
       debug,
     };
@@ -524,6 +630,91 @@ impl ViewerServer {
   /// Reset the accumulated goal counters (useful when restarting a match).
   pub fn reset_goals(&self) {
     *self.goal_tracker.lock() = GoalTracker::default();
+  }
+}
+
+fn replay_robot_inputs(replay_frame: &ReplayFrame) -> Vec<RobotInputInfo> {
+  let inputs = replay_frame
+    .debug
+    .iter()
+    .flat_map(|snapshot| {
+      snapshot.robots.iter().map(|robot| RobotInputInfo {
+        world_id: snapshot.world_id,
+        team: robot.team,
+        id: robot.id,
+        input: robot
+          .message
+          .as_ref()
+          .filter(|message| !message.is_empty())
+          .cloned()
+          .unwrap_or_else(|| robot.task.clone()),
+      })
+    })
+    .collect::<Vec<_>>();
+  if inputs.is_empty() {
+    robot_inputs_for_frame(replay_frame)
+  } else {
+    inputs
+  }
+}
+
+#[cfg(feature = "viewer-debug")]
+fn replay_frame_debug_snapshot(
+  world_id: usize,
+  replay_frame: &ReplayFrame,
+) -> Option<ViewerDebugSnapshot> {
+  replay_frame
+    .debug
+    .iter()
+    .find(|snapshot| snapshot.world_id == world_id)
+    .map(ViewerDebugSnapshot::from)
+}
+
+#[cfg(feature = "viewer-debug")]
+impl From<&ReplayDebugSnapshot> for ViewerDebugSnapshot {
+  fn from(snapshot: &ReplayDebugSnapshot) -> Self {
+    Self {
+      world_id: snapshot.world_id,
+      strategy: snapshot.strategy.clone(),
+      robots: snapshot
+        .robots
+        .iter()
+        .map(|robot| RobotDebugInfo {
+          team: robot.team,
+          id: robot.id,
+          task: robot.task.clone(),
+          color: robot.color.clone(),
+          message: robot.message.clone(),
+        })
+        .collect(),
+      overlays: snapshot.overlays.iter().map(DebugOverlay::from).collect(),
+    }
+  }
+}
+
+#[cfg(feature = "viewer-debug")]
+impl From<&ReplayDebugOverlay> for DebugOverlay {
+  fn from(overlay: &ReplayDebugOverlay) -> Self {
+    match overlay {
+      ReplayDebugOverlay::HoloRobot(overlay) => DebugOverlay::HoloRobot(DebugHoloRobot {
+        team: overlay.team,
+        id: overlay.id,
+        x: overlay.x,
+        y: overlay.y,
+        orientation: overlay.orientation,
+        color: overlay.color.clone(),
+        label: overlay.label.clone(),
+      }),
+      ReplayDebugOverlay::KickLine(overlay) => DebugOverlay::KickLine(DebugKickLine {
+        team: overlay.team,
+        id: overlay.id,
+        from_x: overlay.from_x,
+        from_y: overlay.from_y,
+        angle: overlay.angle,
+        color: overlay.color.clone(),
+        label: overlay.label.clone(),
+      }),
+    }
   }
 }
 
@@ -797,6 +988,19 @@ fn handle_client_message(
       control
         .speed_percent
         .store(speed_percent.max(1), Ordering::Relaxed);
+    }
+    return;
+  }
+
+  if let Some(value) = message.strip_prefix("replay:step:") {
+    if !control.enabled.load(Ordering::Relaxed) {
+      return;
+    }
+    if let Ok(delta) = value.trim().parse::<isize>() {
+      control
+        .frame_step_requested
+        .fetch_add(delta.clamp(-1, 1), Ordering::Relaxed);
+      control.running.store(false, Ordering::Relaxed);
     }
   }
 }
