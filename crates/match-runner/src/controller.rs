@@ -6,7 +6,8 @@ use core_dump::proto::Referee;
 use core_dump::types::Ai;
 use simhark::{MoveCommand, RobotCommand, TeamColor, WorldCommand, WorldConfig, WorldState};
 use simhark_faabs::Faabs;
-use simhark_faabs::synth::force_start_referee;
+use simhark_faabs::crashpilot::{FieldSide, GameStartOptions, GameTeam};
+use simhark_faabs::synth::{force_start_referee, referee_command};
 
 /// Referee state resolved relative to a team, as decided by the match director.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +38,7 @@ pub trait Controller {
 
 fn referee_for(gc: GameCommand) -> Option<Referee> {
   match gc {
-    GameCommand::Halt => Some(Referee {
-      command: 0, // HALT
-      ..Default::default()
-    }),
+    GameCommand::Halt => Some(referee_command(0)), // HALT
     // Everything else: keep CrashPilot in the Running phase so it plays. The
     // match director handles kickoff positioning via teleports.
     _ => Some(force_start_referee()),
@@ -51,6 +49,16 @@ fn referee_for(gc: GameCommand) -> Option<Referee> {
 pub struct FaabsController<A: Ai> {
   faabs: Faabs<A>,
   name: String,
+}
+
+fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
+  // Preserve simhark_faabs' existing side convention:
+  // yellow uses x+, blue uses x-.
+  let options = match color {
+    TeamColor::Yellow => GameStartOptions::new(GameTeam::Yellow, FieldSide::PositiveX),
+    TeamColor::Blue => GameStartOptions::new(GameTeam::Blue, FieldSide::NegativeX),
+  };
+  faabs.crash_pilot.start_game(options);
 }
 
 impl<A: Ai + Send> Controller for FaabsController<A> {
@@ -186,7 +194,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
     TeamKind::Bangka => panic!("Bangka is disabled; build with `--features bangka` to enable"),
     #[cfg(feature = "bangka")]
     TeamKind::Bangka => {
-      let faabs = Faabs::with_ai(num_robots, color, bangka::Bangka::new());
+      let mut faabs = Faabs::with_ai(num_robots, color, bangka::Bangka::new());
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "bangka".to_string(),
@@ -201,7 +210,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|s| bongka::Params::from_json_str(&s))
         .unwrap_or_default();
-      let faabs = Faabs::with_ai(num_robots, color, bongka::Bangka::with_params(p));
+      let mut faabs = Faabs::with_ai(num_robots, color, bongka::Bangka::with_params(p));
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "bongka".to_string(),
@@ -219,7 +229,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|s| ungabunga::Params::from_json_str(&s))
         .unwrap_or_default();
-      let faabs = Faabs::with_ai(num_robots, color, ungabunga::Bangka::with_params(p));
+      let mut faabs = Faabs::with_ai(num_robots, color, ungabunga::Bangka::with_params(p));
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "ungabunga".to_string(),
@@ -233,7 +244,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
 
     #[cfg(feature = "ungabunga")]
     TeamKind::Bangka1 => {
-      let faabs = Faabs::with_ai(num_robots, color, ungabunga::Bangka1::new());
+      let mut faabs = Faabs::with_ai(num_robots, color, ungabunga::Bangka1::new());
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "bangka1".to_string(),
@@ -247,7 +259,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
 
     #[cfg(feature = "ungabunga")]
     TeamKind::BangkaLegacy => {
-      let faabs = Faabs::with_ai(num_robots, color, ungabunga::LegacyBangka::new());
+      let mut faabs = Faabs::with_ai(num_robots, color, ungabunga::LegacyBangka::new());
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "legacy".to_string(),
@@ -265,7 +278,8 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
       let ai = MlAi::from_safetensors(path).unwrap_or_else(|err| {
         panic!("failed to load CrashPilot model from {path}: {err}");
       });
-      let faabs = Faabs::with_ai(num_robots, color, ai);
+      let mut faabs = Faabs::with_ai(num_robots, color, ai);
+      start_crash_pilot(&mut faabs, color);
       Box::new(FaabsController {
         faabs,
         name: "crashpilot".to_string(),

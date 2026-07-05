@@ -10,6 +10,7 @@ members = [
     "crates/simhark-sumatra",
     "crates/simhark_faabs",
     "crates/simhark_testing",
+    "crates/match-runner"
 ]
 resolver = "2"
 

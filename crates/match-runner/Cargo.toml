@@ -27,14 +27,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 bangka = { path = "../../../bangka/bangka", optional = true }
 bongka = { path = "../../../bangka/bongka", optional = true }
 ungabunga = { path = "../../../bangka/ungabunga", optional = true }
-artificial_incompetence = { git = "https://github.com/Technulgy-LGNU/CrashPilot", optional = true }
 
 [features]
 default = ["bangka", "bongka", "ungabunga", "sim-time"]
 bangka = ["dep:bangka"]
 bongka = ["dep:bongka"]
 ungabunga = ["dep:ungabunga"]
-artificial_incompetence = ["dep:artificial_incompetence"]
 viewer = ["simhark/viewer"]
 viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs/viewer-debug"]
 sim-time = ["simhark_faabs/sim-time"]

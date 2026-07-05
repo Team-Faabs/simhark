@@ -15,7 +15,8 @@ use director::MatchDirector;
 use evaluator::{Evaluator, MatchReport};
 use logio::GameLog;
 use simhark::{
-  MoveCommand, RobotCommand, RobotState, SimulationEngine, TeamColor, WorldConfig, WorldState,
+  MoveCommand, ReplayDebugSnapshot, ReplayLog, ReplayRecorder, RobotCommand, RobotState,
+  SimulationEngine, TeamColor, WorldConfig, WorldState,
 };
 
 #[cfg(feature = "sim-time")]
@@ -34,6 +35,7 @@ pub struct MatchConfig {
   pub div: char,
   pub seed: u64,
   pub log: Option<String>,
+  pub replay: Option<String>,
   pub log_every: u64,
   pub quiet: bool,
   /// Open the live web viewer (requires the `viewer` build feature).
@@ -59,6 +61,7 @@ impl Default for MatchConfig {
       div: 'b',
       seed: 1,
       log: None,
+      replay: None,
       log_every: 2,
       quiet: false,
       viewer: false,
@@ -170,7 +173,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   };
 
   #[cfg(feature = "viewer")]
-  let viewer = if mc.viewer {
+  let viewer = if mc.viewer && mc.replay.is_none() {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
@@ -185,10 +188,19 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   } else {
     None
   };
-  let pace = mc.realtime || mc.viewer;
+  let pace = mc.replay.is_none() && (mc.realtime || mc.viewer);
 
   let kickoff = director.kickoff_reset();
-  let mut state = engine.step_with_commands(&[kickoff]).remove(0);
+  let mut state = engine
+    .step_with_commands(std::slice::from_ref(&kickoff))
+    .remove(0);
+  let mut replay = mc
+    .replay
+    .as_ref()
+    .map(|_| ReplayRecorder::new(1, cfg.clone(), 60.0, "match-sim".to_string()));
+  if let Some(replay) = replay.as_mut() {
+    replay.push_frame_with_debug(vec![state.clone()], vec![kickoff], Vec::new());
+  }
 
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
@@ -218,7 +230,22 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     wc.blue = blue_cmds;
     wc.yellow = yellow_cmds;
 
+    let replay_wc = wc.clone();
     let new_state = engine.step_with_commands(&[wc]).remove(0);
+    if let Some(replay) = replay.as_mut() {
+      #[cfg(feature = "viewer-debug")]
+      let debug = build_controller_debug_snapshot(
+        new_state.world_id,
+        blue_ctrl.as_deref(),
+        yellow_ctrl.as_deref(),
+      )
+      .map(|snapshot| ReplayDebugSnapshot::from(&snapshot))
+      .into_iter()
+      .collect();
+      #[cfg(not(feature = "viewer-debug"))]
+      let debug = Vec::new();
+      replay.push_frame_with_debug(vec![new_state.clone()], vec![replay_wc], debug);
+    }
     evaluator.tick(&new_state, Some(&state));
 
     #[cfg(feature = "referris")]
@@ -277,7 +304,28 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   if let Some(log) = log {
     let _ = log.close();
   }
+  if let (Some(path), Some(replay)) = (&mc.replay, replay) {
+    write_replay(path, replay.finish());
+  }
   evaluator.finish(state.sim_time)
+}
+
+pub(crate) fn write_replay(path: &str, replay: ReplayLog) {
+  if let Some(parent) = std::path::Path::new(path)
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
+    if let Err(err) = std::fs::create_dir_all(parent) {
+      eprintln!(
+        "failed to create replay directory {}: {err}",
+        parent.display()
+      );
+      return;
+    }
+  }
+  if let Err(err) = replay.write_zstd(path) {
+    eprintln!("failed to write replay {path}: {err}");
+  }
 }
 
 #[cfg(feature = "sim-time")]
@@ -673,6 +721,19 @@ pub(crate) fn publish_controller_debug(
   blue: Option<&dyn controller::Controller>,
   yellow: Option<&dyn controller::Controller>,
 ) {
+  let Some(snapshot) = build_controller_debug_snapshot(world_id, blue, yellow) else {
+    viewer.clear_debug_snapshot(world_id);
+    return;
+  };
+  viewer.set_debug_snapshot(snapshot);
+}
+
+#[cfg(feature = "viewer-debug")]
+pub(crate) fn build_controller_debug_snapshot(
+  world_id: usize,
+  blue: Option<&dyn controller::Controller>,
+  yellow: Option<&dyn controller::Controller>,
+) -> Option<simhark::viewer::ViewerDebugSnapshot> {
   let snapshots = [blue, yellow]
     .into_iter()
     .flatten()
@@ -680,8 +741,7 @@ pub(crate) fn publish_controller_debug(
     .collect::<Vec<_>>();
 
   if snapshots.is_empty() {
-    viewer.clear_debug_snapshot(world_id);
-    return;
+    return None;
   }
 
   let strategy = snapshots
@@ -701,12 +761,12 @@ pub(crate) fn publish_controller_debug(
     .flat_map(|snapshot| snapshot.overlays)
     .collect();
 
-  viewer.set_debug_snapshot(simhark::viewer::ViewerDebugSnapshot {
+  Some(simhark::viewer::ViewerDebugSnapshot {
     world_id,
     strategy: (!strategy.is_empty()).then_some(strategy),
     robots,
     overlays,
-  });
+  })
 }
 
 fn format_optional_robot_command(commands: &[RobotCommand], robot_id: usize) -> String {

@@ -12,6 +12,8 @@ use match_runner::evaluator::MatchReport;
 use match_runner::{MatchConfig, run_match};
 use simhark::config::MAX_ROBOTS_PER_TEAM;
 
+const DEFAULT_REPLAY_PATH: &str = "__simhark_default_replay_path__";
+
 struct Args {
   mc: MatchConfig,
   matches: usize,
@@ -25,24 +27,43 @@ fn parse() -> Result<Args, String> {
   let log_base: Option<String>;
   let mut log = None;
 
-  let mut it = std::env::args().skip(1);
+  let mut it = std::env::args().skip(1).peekable();
   while let Some(a) = it.next() {
-    let mut next = || it.next().ok_or_else(|| format!("missing value for {a}"));
     match a.as_str() {
-      "--blue" => mc.blue = TeamKind::parse(&next()?)?,
-      "--yellow" => mc.yellow = TeamKind::parse(&next()?)?,
-      "--blue-bots" => mc.blue_bots = Some(parse_bots(&next()?, "--blue-bots")?),
-      "--yellow-bots" => mc.yellow_bots = Some(parse_bots(&next()?, "--yellow-bots")?),
-      "--seconds" => mc.seconds = next()?.parse().map_err(|_| "bad --seconds")?,
-      "--div" => mc.div = next()?.chars().next().unwrap_or('b'),
-      "--seed" => mc.seed = next()?.parse().map_err(|_| "bad --seed")?,
-      "--matches" => matches = next()?.parse().map_err(|_| "bad --matches")?,
-      "--log" => log = Some(next()?),
-      "--summary" => summary = Some(next()?),
-      "--log-every" => mc.log_every = next()?.parse().map_err(|_| "bad --log-every")?,
+      "--blue" => mc.blue = TeamKind::parse(&next_arg(&mut it, &a)?)?,
+      "--yellow" => mc.yellow = TeamKind::parse(&next_arg(&mut it, &a)?)?,
+      "--blue-bots" => mc.blue_bots = Some(parse_bots(&next_arg(&mut it, &a)?, "--blue-bots")?),
+      "--yellow-bots" => {
+        mc.yellow_bots = Some(parse_bots(&next_arg(&mut it, &a)?, "--yellow-bots")?)
+      }
+      "--seconds" => {
+        mc.seconds = next_arg(&mut it, &a)?
+          .parse()
+          .map_err(|_| "bad --seconds")?
+      }
+      "--div" => mc.div = next_arg(&mut it, &a)?.chars().next().unwrap_or('b'),
+      "--seed" => mc.seed = next_arg(&mut it, &a)?.parse().map_err(|_| "bad --seed")?,
+      "--matches" => {
+        matches = next_arg(&mut it, &a)?
+          .parse()
+          .map_err(|_| "bad --matches")?
+      }
+      "--log" => log = Some(next_arg(&mut it, &a)?),
+      "--replay" => {
+        mc.replay =
+          Some(optional_path_arg(&mut it).unwrap_or_else(|| DEFAULT_REPLAY_PATH.to_string()))
+      }
+      "--summary" => summary = Some(next_arg(&mut it, &a)?),
+      "--log-every" => {
+        mc.log_every = next_arg(&mut it, &a)?
+          .parse()
+          .map_err(|_| "bad --log-every")?
+      }
       "--print-commands" => mc.print_commands = true,
       "--print-commands-every" => {
-        mc.print_commands_every = next()?.parse().map_err(|_| "bad --print-commands-every")?
+        mc.print_commands_every = next_arg(&mut it, &a)?
+          .parse()
+          .map_err(|_| "bad --print-commands-every")?
       }
       "--validate-pickup" => mc.validate_pickup = true,
       "--viewer" => mc.viewer = true,
@@ -57,11 +78,28 @@ fn parse() -> Result<Args, String> {
   }
   log_base = log;
   mc.log = log_base;
+  if mc.replay.as_deref() == Some(DEFAULT_REPLAY_PATH) {
+    mc.replay = Some(default_replay_path(&mc));
+  }
   Ok(Args {
     mc,
     matches,
     summary,
   })
+}
+
+fn next_arg<I>(it: &mut std::iter::Peekable<I>, flag: &str) -> Result<String, String>
+where
+  I: Iterator<Item = String>,
+{
+  it.next().ok_or_else(|| format!("missing value for {flag}"))
+}
+
+fn optional_path_arg<I>(it: &mut std::iter::Peekable<I>) -> Option<String>
+where
+  I: Iterator<Item = String>,
+{
+  it.next_if(|value| !value.starts_with('-'))
 }
 
 fn parse_bots(value: &str, flag: &str) -> Result<usize, String> {
@@ -88,6 +126,7 @@ Options:\n\
   --seed <u>        RNG seed (default 1)\n\
   --matches <n>     play n matches (seeds seed..seed+n) and aggregate\n\
   --log <path>      write SSL log file (Loguna-compatible)\n\
+  --replay [path]   write native simhark replay file (.shreplay); with --viewer, serve it afterward\n\
   --summary <path>  append one JSON summary line per run\n\
   --log-every <n>   log every n-th frame (default 2)\n\
   --print-commands  print simulator robot commands to stderr\n\
@@ -160,6 +199,7 @@ async fn main() {
 
   let (mut blue_total, mut yellow_total) = (0.0, 0.0);
   let (mut blue_goals, mut yellow_goals) = (0u32, 0u32);
+  let mut replay_to_serve = None::<String>;
 
   for i in 0..args.matches {
     if !args.mc.quiet && args.matches > 1 {
@@ -169,6 +209,12 @@ async fn main() {
     mc.seed = args.mc.seed.wrapping_add(i as u64);
     if let (Some(base), true) = (&args.mc.log, args.matches > 1) {
       mc.log = Some(base.replace(".log", &format!("_{i}.log")));
+    }
+    if let (Some(base), true) = (&args.mc.replay, args.matches > 1) {
+      mc.replay = Some(suffix_path(base, i));
+    }
+    if let Some(path) = &mc.replay {
+      replay_to_serve = Some(path.clone());
     }
     let report = run_match(&mc);
     blue_total += report.blue.score;
@@ -192,4 +238,151 @@ async fn main() {
       yellow_goals,
     );
   }
+
+  if args.mc.viewer
+    && let Some(path) = replay_to_serve
+  {
+    serve_replay(&path);
+  }
+}
+
+fn default_replay_path(mc: &MatchConfig) -> String {
+  let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|duration| duration.as_secs())
+    .unwrap_or(0);
+  format!(
+    "recordings/{}_vs_{}_div{}_seed{}_{}.shreplay",
+    safe_name(mc.blue.label()),
+    safe_name(mc.yellow.label()),
+    mc.div.to_ascii_lowercase(),
+    mc.seed,
+    timestamp,
+  )
+}
+
+fn safe_name(value: &str) -> String {
+  let mut out = value
+    .chars()
+    .map(|ch| {
+      if ch.is_ascii_alphanumeric() {
+        ch.to_ascii_lowercase()
+      } else {
+        '-'
+      }
+    })
+    .collect::<String>();
+  while out.contains("--") {
+    out = out.replace("--", "-");
+  }
+  out.trim_matches('-').to_string()
+}
+
+fn suffix_path(path: &str, index: usize) -> String {
+  let path = std::path::Path::new(path);
+  let stem = path
+    .file_stem()
+    .and_then(|stem| stem.to_str())
+    .unwrap_or("replay");
+  let ext = path.extension().and_then(|ext| ext.to_str());
+  let name = match ext {
+    Some(ext) => format!("{stem}_{index}.{ext}"),
+    None => format!("{stem}_{index}"),
+  };
+  path.with_file_name(name).display().to_string()
+}
+
+#[cfg(feature = "viewer")]
+fn serve_replay(path: &str) {
+  use std::thread;
+  use std::time::Duration;
+
+  let replay = match simhark::ReplayLog::read_zstd(path) {
+    Ok(replay) => replay,
+    Err(err) => {
+      eprintln!("failed to load replay {path}: {err}");
+      return;
+    }
+  };
+  if replay.frames.is_empty() {
+    eprintln!("replay {path} has no frames");
+    return;
+  }
+
+  let vc = simhark::viewer::ViewerConfig::default();
+  let viewer = match simhark::viewer::ViewerServer::bind(
+    vc,
+    replay.metadata.world_count,
+    &replay.metadata.world_config,
+  ) {
+    Ok(viewer) => viewer,
+    Err(err) => {
+      eprintln!("replay viewer bind failed: {err}");
+      return;
+    }
+  };
+  viewer.enable_web_control();
+  println!("replay viewer: {}", vc.http_url());
+  println!(
+    "loaded replay: {} frames, {} events from {}",
+    replay.frames.len(),
+    replay.events.len(),
+    path
+  );
+
+  let mut index = 0usize;
+  viewer.publish_replay_frame(
+    &replay.frames[index],
+    index,
+    replay.frames.len(),
+    &replay.events,
+    replay.metadata.tick_hz,
+  );
+  loop {
+    let step = viewer.take_frame_step_request();
+    if step != 0 {
+      index = apply_frame_step(index, step, replay.frames.len());
+    }
+    if viewer.is_running() {
+      viewer.publish_replay_frame(
+        &replay.frames[index],
+        index,
+        replay.frames.len(),
+        &replay.events,
+        replay.metadata.tick_hz,
+      );
+      index = (index + 1).min(replay.frames.len().saturating_sub(1));
+      let delay = Duration::from_secs_f64(1.0 / replay.metadata.tick_hz.max(1.0));
+      thread::sleep(viewer.scaled_sleep(delay));
+    } else {
+      viewer.publish_replay_frame(
+        &replay.frames[index],
+        index,
+        replay.frames.len(),
+        &replay.events,
+        replay.metadata.tick_hz,
+      );
+      thread::sleep(Duration::from_millis(33));
+    }
+    if viewer.take_restart_request() {
+      viewer.reset_goals();
+      index = 0;
+    }
+  }
+}
+
+#[cfg(feature = "viewer")]
+fn apply_frame_step(index: usize, step: isize, len: usize) -> usize {
+  if len == 0 {
+    return 0;
+  }
+  let max = len.saturating_sub(1) as isize;
+  (index as isize + step).clamp(0, max) as usize
+}
+
+#[cfg(not(feature = "viewer"))]
+fn serve_replay(path: &str) {
+  println!(
+    "wrote replay to {path}; rebuild match-runner with `--features viewer` to auto-open the replay viewer"
+  );
 }

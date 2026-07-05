@@ -34,6 +34,7 @@ pub mod grsim;
 pub mod motion_audit;
 pub mod physics;
 pub mod proto;
+pub mod replay;
 pub mod robot;
 pub mod state;
 #[cfg(feature = "viewer")]
@@ -51,5 +52,10 @@ pub use controller::{ControlledTeams, FnTeamController, NoopController, TeamCont
 pub use domain_randomization::{DomainRandomizer, RandomizationConfig};
 pub use engine::SimulationEngine;
 pub use grsim::{GrSimCompatConfig, GrSimCompatServer};
+pub use replay::{
+  ReplayDebugHoloRobot, ReplayDebugKickLine, ReplayDebugOverlay, ReplayDebugSnapshot, ReplayEvent,
+  ReplayEventKind, ReplayFrame, ReplayLog, ReplayMetadata, ReplayRecorder, ReplayRobotDebugInfo,
+  RobotInputInfo,
+};
 pub use state::{BallState, RobotState, TeamColor, WorldState};
 pub use world::World;

@@ -14,7 +14,9 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use simhark::{SimulationEngine, TeamColor, WorldCommand, WorldState};
+use simhark::{
+  ReplayDebugSnapshot, ReplayRecorder, SimulationEngine, TeamColor, WorldCommand, WorldState,
+};
 use simhark_sumatra::{
   SumatraInstance, SumatraLaunchConfig, SumatraSimNetConfig, SumatraSimNetServer,
 };
@@ -167,8 +169,16 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
   };
 
   let kickoff = director.kickoff_reset();
-  let mut state = pop_state(server.step_with_local_commands(&mut engine, &[kickoff])?)
-    .context("first step produced no state")?;
+  let mut state =
+    pop_state(server.step_with_local_commands(&mut engine, std::slice::from_ref(&kickoff))?)
+      .context("first step produced no state")?;
+  let mut replay = mc
+    .replay
+    .as_ref()
+    .map(|_| ReplayRecorder::new(1, cfg.clone(), 60.0, "match-sim sumatra".to_string()));
+  if let Some(replay) = replay.as_mut() {
+    replay.push_frame_with_debug(vec![state.clone()], vec![kickoff], Vec::new());
+  }
 
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
@@ -196,10 +206,25 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
     maybe_print_commands(mc, state.sim_time, state.frame, &wc.blue, &wc.yellow);
     pickup_validator.maybe_validate(mc, &state, &wc.blue, &wc.yellow);
 
+    let replay_wc = wc.clone();
     let new_state = match pop_state(server.step_with_local_commands(&mut engine, &[wc])?) {
       Some(s) => s,
       None => break,
     };
+    if let Some(replay) = replay.as_mut() {
+      #[cfg(feature = "viewer-debug")]
+      let debug = crate::build_controller_debug_snapshot(
+        new_state.world_id,
+        blue_ctrl.as_deref(),
+        yellow_ctrl.as_deref(),
+      )
+      .map(|snapshot| ReplayDebugSnapshot::from(&snapshot))
+      .into_iter()
+      .collect();
+      #[cfg(not(feature = "viewer-debug"))]
+      let debug = Vec::new();
+      replay.push_frame_with_debug(vec![new_state.clone()], vec![replay_wc], debug);
+    }
     evaluator.tick(&new_state, Some(&state));
 
     #[cfg(feature = "referris")]
@@ -265,6 +290,9 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
 
   if let Some(log) = log {
     let _ = log.close();
+  }
+  if let (Some(path), Some(replay)) = (&mc.replay, replay) {
+    crate::write_replay(path, replay.finish());
   }
   // Instances are killed on drop.
   Ok(evaluator.finish(state.sim_time))
