@@ -8,7 +8,6 @@ loguna = { path = "../loguna/loguna" }
 
 [patch."https://github.com/Technulgy-LGNU/CrashPilot"]
 crashpilot = { path = "../CrashPilot" }
-artificial_incompetence = { path = "../CrashPilot/crates/artificial_incompetence" }
 
 [patch."https://github.com/Technulgy-LGNU/teamfaabs-ssl-robot-code"]
 tf_jetsoncode = { path = "../teamfaabs-ssl-robot-code/tf_jetsoncode" }
