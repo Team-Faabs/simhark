@@ -246,6 +246,7 @@ fn get_config(num_robots: u8) -> crashpilot::Config {
           server: ServerConfig::default(),
           logging: LoggingConfig::default(),
           robots: HashMap::new(),
+          world_model: crashpilot::config::WorldModelConfig::default(),
         }
       });
   let mut robots = HashMap::new();

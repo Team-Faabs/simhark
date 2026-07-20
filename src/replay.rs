@@ -56,7 +56,7 @@ pub struct ReplayRobotDebugInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ReplayDebugOverlay {
   HoloRobot(ReplayDebugHoloRobot),
   KickLine(ReplayDebugKickLine),
@@ -94,7 +94,7 @@ pub struct ReplayEvent {
   pub details: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayEventKind {
   GoalBlue,
@@ -386,4 +386,65 @@ pub fn robot_inputs_for_frame(frame: &ReplayFrame) -> Vec<RobotInputInfo> {
         }))
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::config::WorldConfig;
+  use crate::state::TeamColor;
+
+  #[test]
+  fn zstd_bincode_round_trip_supports_debug_overlays() {
+    let path = std::env::temp_dir().join(format!(
+      "simhark-replay-round-trip-{}.shreplay",
+      std::process::id()
+    ));
+
+    let replay = ReplayLog {
+      metadata: ReplayMetadata {
+        world_count: 1,
+        world_config: WorldConfig::division_b(),
+        tick_hz: 60.0,
+        source: "test".to_string(),
+      },
+      frames: vec![ReplayFrame {
+        frame: 7,
+        sim_time: 7.0 / 60.0,
+        states: Vec::new(),
+        commands: Vec::new(),
+        debug: vec![ReplayDebugSnapshot {
+          world_id: 0,
+          strategy: Some("test strategy".to_string()),
+          robots: Vec::new(),
+          overlays: vec![ReplayDebugOverlay::KickLine(ReplayDebugKickLine {
+            team: TeamColor::Blue,
+            id: 2,
+            from_x: 1.0,
+            from_y: -0.5,
+            angle: 0.25,
+            color: "#00aaff".to_string(),
+            label: Some("shot".to_string()),
+          })],
+        }],
+        events: Vec::new(),
+      }],
+      events: Vec::new(),
+    };
+
+    replay.write_zstd(&path).unwrap();
+    let decoded = ReplayLog::read_zstd(&path).unwrap();
+    let _ = std::fs::remove_file(path);
+
+    assert_eq!(decoded.frames.len(), 1);
+    assert_eq!(decoded.frames[0].debug.len(), 1);
+    match &decoded.frames[0].debug[0].overlays[0] {
+      ReplayDebugOverlay::KickLine(line) => {
+        assert_eq!(line.team, TeamColor::Blue);
+        assert_eq!(line.id, 2);
+        assert_eq!(line.label.as_deref(), Some("shot"));
+      }
+      ReplayDebugOverlay::HoloRobot(_) => panic!("expected kick line overlay"),
+    }
+  }
 }

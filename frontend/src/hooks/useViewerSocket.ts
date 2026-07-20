@@ -178,12 +178,29 @@ export interface ViewerFrame {
 }
 
 const RECONNECT_DELAY_MS = 1000;
+const SCRUB_SEND_INTERVAL_MS = 40;
 
 export function useViewerSocket(wsPort: number) {
   const [frame, setFrame] = useState<ViewerFrame | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubFrameRef = useRef<number | null>(null);
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushScrubReplay = useCallback(() => {
+    scrubTimerRef.current = null;
+    const frameIndex = scrubFrameRef.current;
+    scrubFrameRef.current = null;
+    const socket = socketRef.current;
+    if (frameIndex === null || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (socket.bufferedAmount > 0) {
+      scrubFrameRef.current = frameIndex;
+      scrubTimerRef.current = setTimeout(flushScrubReplay, SCRUB_SEND_INTERVAL_MS);
+      return;
+    }
+    socket.send(`replay:seek:${frameIndex}`);
+  }, []);
 
   const connect = useCallback(() => {
     if (socketRef.current?.readyState === WebSocket.OPEN) return;
@@ -225,6 +242,7 @@ export function useViewerSocket(wsPort: number) {
     connect();
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
       socketRef.current?.close();
     };
   }, [connect]);
@@ -268,5 +286,54 @@ export function useViewerSocket(wsPort: number) {
     }
   }, []);
 
-  return { frame, connected, selectWorld, selectWorlds, sendControl, setSpeed, stepReplay };
+  const skipReplay = useCallback((deltaFrames: number) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(`replay:skip:${Math.trunc(deltaFrames)}`);
+    }
+  }, []);
+
+  const seekReplay = useCallback((frameIndex: number) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(`replay:seek:${Math.max(0, Math.floor(frameIndex))}`);
+    }
+  }, []);
+
+  const scrubReplay = useCallback(
+    (frameIndex: number) => {
+      scrubFrameRef.current = Math.max(0, Math.floor(frameIndex));
+      if (scrubTimerRef.current) return;
+      scrubTimerRef.current = setTimeout(flushScrubReplay, SCRUB_SEND_INTERVAL_MS);
+    },
+    [flushScrubReplay]
+  );
+
+  const flushReplayScrub = useCallback(
+    (frameIndex?: number) => {
+      if (scrubTimerRef.current) {
+        clearTimeout(scrubTimerRef.current);
+        scrubTimerRef.current = null;
+      }
+      scrubFrameRef.current = null;
+      if (typeof frameIndex === "number") {
+        seekReplay(frameIndex);
+      }
+    },
+    [seekReplay]
+  );
+
+  return {
+    frame,
+    connected,
+    selectWorld,
+    selectWorlds,
+    sendControl,
+    setSpeed,
+    stepReplay,
+    skipReplay,
+    seekReplay,
+    scrubReplay,
+    flushReplayScrub,
+  };
 }

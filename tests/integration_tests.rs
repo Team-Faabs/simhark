@@ -792,8 +792,7 @@ fn test_one_touch_kick_rebounds_incoming_ball() {
   });
 
   let state = world.get_state();
-  let expected =
-    kick_speed + incoming_speed * world.config.blue_robots.kicker_damp_factor;
+  let expected = kick_speed + incoming_speed * world.config.blue_robots.kicker_damp_factor;
   assert!(
     state.ball.vx > kick_speed && (state.ball.vx - expected).abs() < 0.2,
     "one-touch kick should leave faster than kicking a stationary ball \

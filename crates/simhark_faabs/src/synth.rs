@@ -3,12 +3,28 @@ use core_dump::proto::{
   InterfaceWrapperCp,
 };
 use simhark::TeamColor;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn force_start_referee() -> core_dump::proto::Referee {
+fn current_time_micros() -> u64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_micros() as u64
+}
+
+pub fn referee_command(command: i32) -> core_dump::proto::Referee {
+  let now = current_time_micros();
   core_dump::proto::Referee {
-    command: 3, // FORCE_START
+    packet_timestamp: now,
+    command,
+    command_counter: 1,
+    command_timestamp: 1,
     ..Default::default()
   }
+}
+
+pub fn force_start_referee() -> core_dump::proto::Referee {
+  referee_command(3) // FORCE_START
 }
 
 pub fn interface_command(team: TeamColor) -> InterfaceWrapperCp {

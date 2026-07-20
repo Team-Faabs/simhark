@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from "react";
-import type { PointerEvent } from "react";
+import type { PointerEvent, WheelEvent } from "react";
 import type {
   BallTrajectory,
   FieldConfig,
@@ -10,11 +10,23 @@ import type {
   ViewerDebugSnapshot,
   ViewerFrame,
 } from "../hooks/useViewerSocket";
+import {
+  currentReplayPhase,
+  formatReplayTime,
+  isGoalEvent,
+  nextActivePhaseFrame,
+  phaseColor,
+  replayEventColor,
+  replayPhases,
+} from "../replayTimeline";
 
 interface FieldCanvasProps {
   frame: ViewerFrame | null;
   debugTeamFilter?: "Blue" | "Yellow" | null;
   showDebugOverlays?: boolean;
+  onSeekReplay?: (frameIndex: number) => void;
+  onScrubReplay?: (frameIndex: number) => void;
+  onScrubReplayEnd?: (frameIndex?: number) => void;
 }
 
 const FIELD_GREEN_LIGHT = "#1a5c34";
@@ -25,6 +37,9 @@ const BLUE_COLOR = "#3b82f6";
 const YELLOW_COLOR = "#f59e0b";
 const BALL_TRAJECTORY_COLOR = "#ff4fb8";
 const PADDING = 36;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 8;
+const WHEEL_ZOOM_SPEED = 0.0015;
 
 const WORLD_COLORS = [
   { base: "#38bdf8", light: "#bae6fd", dark: "#0369a1" },
@@ -52,16 +67,25 @@ type RobotHitTarget = {
   input: string | null;
 };
 type RobotHover = RobotHitTarget & { mouseX: number; mouseY: number };
+type ViewTransform = {
+  zoom: number;
+  panX: number;
+  panY: number;
+};
 
 export default function FieldCanvas({
   frame,
   debugTeamFilter = null,
   showDebugOverlays = false,
+  onSeekReplay,
+  onScrubReplay,
+  onScrubReplayEnd,
 }: FieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<ViewerFrame | null>(frame);
   const hitTargetsRef = useRef<RobotHitTarget[]>([]);
+  const viewRef = useRef<ViewTransform>({ zoom: MIN_ZOOM, panX: 0, panY: 0 });
   const [hover, setHover] = useState<RobotHover | null>(null);
 
   // Keep latest frame in a ref so the resize observer can redraw without
@@ -112,12 +136,14 @@ export default function FieldCanvas({
     const halfBoundsX =
       fieldLength / 2 + field.margin_goal_line + field.goal_depth + 0.2;
     const halfBoundsY = fieldWidth / 2 + field.margin_touch_line + 0.2;
-    const scale = Math.min(
+    const baseScale = Math.min(
       (w - 2 * PADDING) / (halfBoundsX * 2),
       (h - 2 * PADDING) / (halfBoundsY * 2)
     );
-    const offsetX = w / 2;
-    const offsetY = h / 2;
+    const view = viewRef.current;
+    const scale = baseScale * view.zoom;
+    const offsetX = w / 2 + view.panX;
+    const offsetY = h / 2 + view.panY;
     const toCanvas = (fx: number, fy: number): [number, number] => [
       offsetX + fx * scale,
       offsetY - fy * scale,
@@ -245,14 +271,73 @@ export default function FieldCanvas({
     setHover(target ? { ...target, mouseX, mouseY } : null);
   }, []);
 
+  const handleWheel = useCallback(
+    (event: WheelEvent<HTMLDivElement>) => {
+      const snapshot = frameRef.current;
+      const container = containerRef.current;
+      if (!snapshot || !container) return;
+
+      event.preventDefault();
+      const rect = container.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const field = snapshot.field;
+      const halfBoundsX =
+        field.field_length / 2 + field.margin_goal_line + field.goal_depth + 0.2;
+      const halfBoundsY = field.field_width / 2 + field.margin_touch_line + 0.2;
+      const baseScale = Math.min(
+        (rect.width - 2 * PADDING) / (halfBoundsX * 2),
+        (rect.height - 2 * PADDING) / (halfBoundsY * 2)
+      );
+
+      const view = viewRef.current;
+      const nextZoom = clamp(
+        view.zoom * Math.exp(-event.deltaY * WHEEL_ZOOM_SPEED),
+        MIN_ZOOM,
+        MAX_ZOOM
+      );
+      if (nextZoom === view.zoom) return;
+
+      if (nextZoom === MIN_ZOOM) {
+        viewRef.current = { zoom: MIN_ZOOM, panX: 0, panY: 0 };
+        draw();
+        return;
+      }
+
+      const oldScale = baseScale * view.zoom;
+      const nextScale = baseScale * nextZoom;
+      const centerX = rect.width / 2;
+      const centerY = rect.height / 2;
+      const fieldX = (mouseX - centerX - view.panX) / oldScale;
+      const fieldY = (centerY + view.panY - mouseY) / oldScale;
+
+      viewRef.current = {
+        zoom: nextZoom,
+        panX: mouseX - centerX - fieldX * nextScale,
+        panY: mouseY - centerY + fieldY * nextScale,
+      };
+      draw();
+    },
+    [draw]
+  );
+
   return (
     <div
       ref={containerRef}
       className="w-full h-full relative"
       onPointerMove={handlePointerMove}
       onPointerLeave={() => setHover(null)}
+      onWheel={handleWheel}
     >
       <canvas ref={canvasRef} className="absolute inset-0" />
+      {frame?.replay.enabled && (
+        <CanvasReplayTimeline
+          frame={frame}
+          onSeek={onSeekReplay}
+          onScrub={onScrubReplay}
+          onScrubEnd={onScrubReplayEnd}
+        />
+      )}
       {hover && (
         <div
           className="pointer-events-none absolute z-10 max-w-96 rounded-md border border-slate-600/70 bg-slate-950/92 px-2.5 py-2 text-[11px] text-slate-100 shadow-xl"
@@ -276,6 +361,152 @@ export default function FieldCanvas({
   );
 }
 
+function CanvasReplayTimeline({
+  frame,
+  onSeek,
+  onScrub,
+  onScrubEnd,
+}: {
+  frame: ViewerFrame;
+  onSeek?: (frameIndex: number) => void;
+  onScrub?: (frameIndex: number) => void;
+  onScrubEnd?: (frameIndex?: number) => void;
+}) {
+  const replay = frame.replay;
+  const progress = replay.frame_count > 0
+    ? (replay.frame_index + 1) / replay.frame_count
+    : 0;
+  const phases = replayPhases(frame.events, replay);
+  const currentPhase = currentReplayPhase(frame.events, replay, frame.game_state);
+  const nextActiveFrame = nextActivePhaseFrame(frame.events, replay);
+  const scrubFrameRef = useRef<number | null>(null);
+
+  const seekFromPointer = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if ((!onScrub && !onSeek) || replay.frame_count <= 0) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+      const frameIndex = Math.round(ratio * (replay.frame_count - 1));
+      if (scrubFrameRef.current === frameIndex) return;
+      scrubFrameRef.current = frameIndex;
+      (onScrub ?? onSeek)?.(frameIndex);
+    },
+    [onScrub, onSeek, replay.frame_count]
+  );
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      scrubFrameRef.current = null;
+      seekFromPointer(event);
+    },
+    [seekFromPointer]
+  );
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+      event.preventDefault();
+      seekFromPointer(event);
+    },
+    [seekFromPointer]
+  );
+  const handlePointerEnd = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const finalFrame = scrubFrameRef.current ?? undefined;
+    scrubFrameRef.current = null;
+    onScrubEnd?.(finalFrame);
+  }, [onScrubEnd]);
+
+  return (
+    <div className="pointer-events-none absolute inset-x-8 bottom-5 z-10">
+      <div className="drop-shadow-[0_1px_5px_rgba(0,0,0,0.9)]">
+        <div className="mb-1.5 flex items-center justify-between gap-3">
+          <div className="min-w-0 text-shadow-sm">
+            <span className="block truncate text-[11px] font-semibold text-slate-100">
+              {currentPhase?.label ?? "Replay"}
+            </span>
+            <span className="font-mono text-[10px] text-slate-400">
+              {formatReplayTime(replay.frame_index, replay.base_speed)} / {formatReplayTime(Math.max(0, replay.frame_count - 1), replay.base_speed)}
+            </span>
+          </div>
+          {nextActiveFrame !== null && (
+            <button
+              type="button"
+              onClick={() => onSeek?.(nextActiveFrame)}
+              className="pointer-events-auto shrink-0 rounded border border-white/15 bg-black/45 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-100 transition hover:border-cyan-300/70 hover:text-cyan-100 focus:outline-none focus:ring-1 focus:ring-cyan-300/80"
+            >
+              Skip {currentPhase?.label ?? "inactive"}
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          className="pointer-events-auto relative block h-5 w-full cursor-ew-resize touch-none focus:outline-none focus:ring-1 focus:ring-cyan-300/80"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          aria-label="Scrub replay timeline"
+        >
+          <span className="absolute left-0 right-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-black/45">
+            {phases.map((phase, index) => {
+              const left = replay.frame_count > 1
+                ? (phase.startFrame / (replay.frame_count - 1)) * 100
+                : 0;
+              const width = replay.frame_count > 1
+                ? ((phase.endFrame - phase.startFrame + 1) / replay.frame_count) * 100
+                : 100;
+              return (
+                <span
+                  key={`${phase.startFrame}-${phase.raw}-${index}`}
+                  className="absolute inset-y-0"
+                  title={phase.label}
+                  style={{
+                    left: `${Math.max(0, Math.min(100, left))}%`,
+                    width: `${Math.max(0.3, Math.min(100, width))}%`,
+                    backgroundColor: phaseColor(phase, index),
+                    opacity: phase.isInactive ? 0.3 : 0.42,
+                  }}
+                />
+              );
+            })}
+            <span
+              className="absolute inset-y-0 left-0 rounded-full bg-[#ff174f]"
+              style={{ width: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
+            />
+          </span>
+          {frame.events.map((event, index) => {
+            const left = replay.frame_count > 1
+              ? (event.frame / (replay.frame_count - 1)) * 100
+              : 0;
+            return (
+              <span
+                key={`${event.frame}-${event.kind}-${index}`}
+                className={[
+                  "absolute top-1/2 -translate-x-1/2 -translate-y-1/2 border border-slate-950/80 shadow",
+                  isGoalEvent(event.kind)
+                    ? "h-4 w-1.5 rounded-sm ring-1 ring-white/80"
+                    : "h-3 w-1 rounded-full",
+                ].join(" ")}
+                style={{
+                  left: `${Math.max(0, Math.min(100, left))}%`,
+                  backgroundColor: replayEventColor(event.kind),
+                }}
+              />
+            );
+          })}
+          <span
+            className="absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#ff174f] shadow shadow-black/70"
+            style={{ left: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function robotInputLookup(inputs: RobotInputInfo[]): Map<string, string> {
   const lookup = new Map<string, string>();
   for (const input of inputs) {
@@ -286,6 +517,10 @@ function robotInputLookup(inputs: RobotInputInfo[]): Map<string, string> {
 
 function robotInputKey(worldId: number, team: "Blue" | "Yellow", id: number): string {
   return `${worldId}:${team}:${id}`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function drawField(

@@ -15,10 +15,9 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tungstenite::{Message, accept};
 
 use crate::config::{FieldConfig, WorldConfig};
-use crate::replay::{
-  ReplayDebugOverlay, ReplayDebugSnapshot, ReplayEvent, ReplayFrame, RobotInputInfo,
-  robot_inputs_for_frame,
-};
+#[cfg(feature = "viewer-debug")]
+use crate::replay::{ReplayDebugOverlay, ReplayDebugSnapshot};
+use crate::replay::{ReplayEvent, ReplayFrame, RobotInputInfo, robot_inputs_for_frame};
 #[cfg(feature = "viewer-debug")]
 use crate::state::TeamColor;
 use crate::state::WorldState;
@@ -174,6 +173,8 @@ struct WebControlState {
   stop_requested: AtomicBool,
   speed_percent: AtomicUsize,
   frame_step_requested: AtomicIsize,
+  frame_skip_requested: AtomicIsize,
+  frame_seek_requested: AtomicIsize,
 }
 
 #[derive(Serialize)]
@@ -298,6 +299,7 @@ impl ViewerServer {
     #[cfg(feature = "viewer-debug")]
     let debug = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(WebControlState::default());
+    control.frame_seek_requested.store(-1, Ordering::Relaxed);
     // When web control is disabled the simulator is considered always
     // running, so callers that don't opt in see the legacy behaviour.
     control.running.store(true, Ordering::Relaxed);
@@ -380,6 +382,18 @@ impl ViewerServer {
 
   pub fn take_frame_step_request(&self) -> isize {
     self.control.frame_step_requested.swap(0, Ordering::Relaxed)
+  }
+
+  pub fn take_frame_skip_request(&self) -> isize {
+    self.control.frame_skip_requested.swap(0, Ordering::Relaxed)
+  }
+
+  pub fn take_frame_seek_request(&self) -> Option<usize> {
+    let value = self
+      .control
+      .frame_seek_requested
+      .swap(-1, Ordering::Relaxed);
+    usize::try_from(value).ok()
   }
 
   pub fn speed(&self) -> f64 {
@@ -899,21 +913,37 @@ fn run_websocket_server(
       let mut last_sent = String::new();
 
       loop {
-        match websocket.read() {
-          Ok(Message::Text(text)) => {
-            handle_client_message(text.as_str(), &selected_world, &selected_worlds, &control)
+        let mut close_requested = false;
+        loop {
+          match websocket.read() {
+            Ok(Message::Text(text)) => {
+              handle_client_message(text.as_str(), &selected_world, &selected_worlds, &control)
+            }
+            Ok(Message::Close(_)) => {
+              close_requested = true;
+              break;
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(err))
+              if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+              ) =>
+            {
+              break;
+            }
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+              close_requested = true;
+              break;
+            }
+            Err(_) => {
+              close_requested = true;
+              break;
+            }
           }
-          Ok(Message::Close(_)) => break,
-          Ok(_) => {}
-          Err(tungstenite::Error::Io(err))
-            if matches!(
-              err.kind(),
-              std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ) => {}
-          Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-            break;
-          }
-          Err(_) => break,
+        }
+        if close_requested {
+          break;
         }
 
         if let Some(frame) = latest_frame.lock().clone() {
@@ -999,8 +1029,32 @@ fn handle_client_message(
     if let Ok(delta) = value.trim().parse::<isize>() {
       control
         .frame_step_requested
-        .fetch_add(delta.clamp(-1, 1), Ordering::Relaxed);
+        .fetch_add(delta.clamp(-10_000, 10_000), Ordering::Relaxed);
       control.running.store(false, Ordering::Relaxed);
+    }
+    return;
+  }
+
+  if let Some(value) = message.strip_prefix("replay:skip:") {
+    if !control.enabled.load(Ordering::Relaxed) {
+      return;
+    }
+    if let Ok(delta) = value.trim().parse::<isize>() {
+      control
+        .frame_skip_requested
+        .fetch_add(delta.clamp(-100_000, 100_000), Ordering::Relaxed);
+    }
+    return;
+  }
+
+  if let Some(value) = message.strip_prefix("replay:seek:") {
+    if !control.enabled.load(Ordering::Relaxed) {
+      return;
+    }
+    if let Ok(frame) = value.trim().parse::<isize>() {
+      control
+        .frame_seek_requested
+        .store(frame.max(0), Ordering::Relaxed);
     }
   }
 }

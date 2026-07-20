@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -5,7 +6,7 @@ use std::time::Duration;
 use loguna::{LogReader, MessageId};
 use prost::Message;
 use simhark::replay::{ReplayEventKind, ReplayFrame};
-use simhark::viewer::{ViewerConfig, ViewerServer};
+use simhark::viewer::{GameStateInfo, ViewerConfig, ViewerServer};
 use simhark::{
   BallState, MoveCommand, ReplayEvent, ReplayLog, ReplayMetadata, ReplayRecorder, RobotCommand,
   RobotState, SimulationEngine, TeamColor, WorldCommand, WorldConfig,
@@ -20,7 +21,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     _ => {
       eprintln!("usage:");
       eprintln!("  simhark-replay record-demo <out.shreplay> [worlds] [steps]");
-      eprintln!("  simhark-replay serve <file.shreplay|ssl.log|ssl.log.gz> [--viewer-port PORT]");
+      eprintln!(
+        "  simhark-replay serve <file.shreplay|ssl.log|ssl.log.gz> [--viewer-port PORT] [--vision2014]"
+      );
+      eprintln!(
+        "    note: SSL log replay uses only VisionTracker2020 by default; pass --vision2014 for raw SSL-Vision packets."
+      );
       std::process::exit(2);
     }
   }
@@ -65,26 +71,19 @@ fn record_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-  let Some(path) = args.first() else {
-    return Err("missing replay/log path".into());
-  };
-  let port = args
-    .windows(2)
-    .find(|window| window[0] == "--viewer-port")
-    .and_then(|window| window[1].parse::<u16>().ok())
-    .unwrap_or(8315);
-  let path = Path::new(path);
+  let options = ServeOptions::parse(args)?;
+  let path = options.path.as_path();
   let replay = if path.extension().is_some_and(|ext| ext == "shreplay") {
     ReplayLog::read_zstd(path)?
   } else {
-    ssl_log_to_replay(path)?
+    ssl_log_to_replay(path, options.vision_source)?
   };
   if replay.frames.is_empty() {
     return Err("replay contains no frames".into());
   }
 
   let config = ViewerConfig {
-    http_port: port,
+    http_port: options.viewer_port,
     ..ViewerConfig::default()
   };
   let viewer = ViewerServer::bind(
@@ -110,9 +109,19 @@ fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     replay.metadata.tick_hz,
   );
   loop {
+    if let Some(frame) = viewer.take_frame_seek_request() {
+      index = frame.min(replay.frames.len().saturating_sub(1));
+    }
+    let skip = viewer.take_frame_skip_request();
+    if skip != 0 {
+      index = apply_frame_step(index, skip, replay.frames.len());
+    }
     let step = viewer.take_frame_step_request();
     if step != 0 {
       index = apply_frame_step(index, step, replay.frames.len());
+    }
+    if let Some(game_state) = replay_game_state_for_frame(&replay.events, index) {
+      viewer.set_game_state(game_state);
     }
     if viewer.is_running() {
       viewer.publish_replay_frame(
@@ -142,6 +151,58 @@ fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
   }
 }
 
+#[derive(Clone, Copy)]
+enum VisionLogSource {
+  Tracker2020,
+  Vision2014,
+}
+
+struct ServeOptions {
+  path: PathBuf,
+  viewer_port: u16,
+  vision_source: VisionLogSource,
+}
+
+impl ServeOptions {
+  fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+    let mut path = None;
+    let mut viewer_port = 8315;
+    let mut vision_source = VisionLogSource::Tracker2020;
+    let mut i = 0;
+    while i < args.len() {
+      match args[i].as_str() {
+        "--viewer-port" => {
+          let Some(value) = args.get(i + 1) else {
+            return Err("missing value for --viewer-port".into());
+          };
+          viewer_port = value.parse::<u16>()?;
+          i += 2;
+        }
+        "--vision2014" | "--raw-vision" => {
+          vision_source = VisionLogSource::Vision2014;
+          i += 1;
+        }
+        value if value.starts_with("--") => {
+          return Err(format!("unknown serve option {value}").into());
+        }
+        value => {
+          if path.is_some() {
+            return Err(format!("unexpected extra replay/log path {value}").into());
+          }
+          path = Some(PathBuf::from(value));
+          i += 1;
+        }
+      }
+    }
+
+    Ok(Self {
+      path: path.ok_or("missing replay/log path")?,
+      viewer_port,
+      vision_source,
+    })
+  }
+}
+
 fn apply_frame_step(index: usize, step: isize, len: usize) -> usize {
   if len == 0 {
     return 0;
@@ -150,17 +211,48 @@ fn apply_frame_step(index: usize, step: isize, len: usize) -> usize {
   (index as isize + step).clamp(0, max) as usize
 }
 
-fn ssl_log_to_replay(path: &Path) -> Result<ReplayLog, Box<dyn std::error::Error>> {
+fn ssl_log_to_replay(
+  path: &Path,
+  vision_source: VisionLogSource,
+) -> Result<ReplayLog, Box<dyn std::error::Error>> {
   let mut reader = LogReader::open(path)?;
   let mut config = WorldConfig::division_a();
   let mut frames = Vec::new();
   let mut events = Vec::new();
   let mut first_capture = None::<f64>;
   let mut last_command_counter = None::<u32>;
+  let mut tracker = VisionTracker::default();
 
   while let Some(message) = reader.next_message()? {
     match message.message_id {
+      MessageId::VisionTracker2020 if matches!(vision_source, VisionLogSource::Tracker2020) => {
+        let Ok(wrapper) = loguna::proto::TrackerWrapperPacket::decode(message.payload.as_slice())
+        else {
+          continue;
+        };
+        let Some(tracked_frame) = wrapper.tracked_frame else {
+          continue;
+        };
+        let base = *first_capture.get_or_insert(tracked_frame.timestamp);
+        let sim_time = (tracked_frame.timestamp - base).max(0.0);
+        let frame_number = tracked_frame.frame_number as u64;
+        frames.push(ReplayFrame {
+          frame: frame_number,
+          sim_time,
+          states: vec![tracked_frame_to_state(
+            &tracked_frame,
+            frame_number,
+            sim_time,
+          )],
+          commands: vec![WorldCommand::default()],
+          debug: Vec::new(),
+          events: Vec::new(),
+        });
+      }
       MessageId::Vision2014 | MessageId::Vision2010 => {
+        if !matches!(vision_source, VisionLogSource::Vision2014) {
+          continue;
+        }
         let Ok(wrapper) = loguna::proto::SslWrapperPacket::decode(message.payload.as_slice())
         else {
           continue;
@@ -174,7 +266,7 @@ fn ssl_log_to_replay(path: &Path) -> Result<ReplayLog, Box<dyn std::error::Error
         let base = *first_capture.get_or_insert(detection.t_capture);
         let sim_time = (detection.t_capture - base).max(0.0);
         let frame_number = detection.frame_number as u64;
-        let state = detection_to_state(&detection, frame_number, sim_time);
+        let state = tracker.detection_to_state(&detection, frame_number, sim_time);
         frames.push(ReplayFrame {
           frame: frame_number,
           sim_time,
@@ -192,14 +284,20 @@ fn ssl_log_to_replay(path: &Path) -> Result<ReplayLog, Box<dyn std::error::Error
           .map(|command| command.as_str_name().to_string())
           .unwrap_or_else(|_| format!("COMMAND_{}", referee.command));
         if last_command_counter != Some(referee.command_counter) {
-          let sim_time = first_capture.map_or(0.0, |_| message.timestamp_secs());
+          let sim_time = frames.last().map_or(0.0, |frame| frame.sim_time);
+          let stage = loguna::proto::referee::Stage::try_from(referee.stage)
+            .map(|stage| stage.as_str_name().to_string())
+            .unwrap_or_else(|_| format!("STAGE_{}", referee.stage));
           events.push(ReplayEvent {
             frame: frames.len() as u64,
             sim_time,
             world_id: None,
             kind: ReplayEventKind::Referee,
             label: command.clone(),
-            details: Some(format!("counter {}", referee.command_counter)),
+            details: Some(format!(
+              "counter {}\nstage {}\nblue {}\nyellow {}",
+              referee.command_counter, stage, referee.blue.name, referee.yellow.name
+            )),
           });
           last_command_counter = Some(referee.command_counter);
         }
@@ -219,6 +317,244 @@ fn ssl_log_to_replay(path: &Path) -> Result<ReplayLog, Box<dyn std::error::Error
     frames,
     events,
   })
+}
+
+fn tracked_frame_to_state(
+  frame: &loguna::proto::TrackedFrame,
+  frame_number: u64,
+  sim_time: f64,
+) -> simhark::WorldState {
+  let ball = frame.balls.first().map_or(
+    BallState {
+      x: 0.0,
+      y: 0.0,
+      z: 0.0,
+      vx: 0.0,
+      vy: 0.0,
+      vz: 0.0,
+    },
+    tracked_ball,
+  );
+  let mut blue_robots = Vec::new();
+  let mut yellow_robots = Vec::new();
+  for robot in &frame.robots {
+    match robot
+      .robot_id
+      .team
+      .and_then(|team| loguna::proto::Team::try_from(team).ok())
+    {
+      Some(loguna::proto::Team::Blue) => blue_robots.push(tracked_robot(robot, TeamColor::Blue)),
+      Some(loguna::proto::Team::Yellow) => {
+        yellow_robots.push(tracked_robot(robot, TeamColor::Yellow));
+      }
+      _ => {}
+    }
+  }
+  blue_robots.sort_by_key(|robot| robot.id);
+  yellow_robots.sort_by_key(|robot| robot.id);
+
+  simhark::WorldState {
+    world_id: 0,
+    sim_time,
+    frame: frame_number,
+    ball,
+    blue_robots,
+    yellow_robots,
+    goal_blue: false,
+    goal_yellow: false,
+  }
+}
+
+fn tracked_ball(ball: &loguna::proto::TrackedBall) -> BallState {
+  BallState {
+    x: ball.pos.x as f64,
+    y: ball.pos.y as f64,
+    z: ball.pos.z as f64,
+    vx: ball.vel.as_ref().map_or(0.0, |vel| vel.x as f64),
+    vy: ball.vel.as_ref().map_or(0.0, |vel| vel.y as f64),
+    vz: ball.vel.as_ref().map_or(0.0, |vel| vel.z as f64),
+  }
+}
+
+fn tracked_robot(robot: &loguna::proto::TrackedRobot, team: TeamColor) -> RobotState {
+  RobotState {
+    id: robot.robot_id.id.unwrap_or(0) as usize,
+    team,
+    x: robot.pos.x as f64,
+    y: robot.pos.y as f64,
+    z: 0.0,
+    orientation: robot.orientation as f64,
+    vx: robot.vel.as_ref().map_or(0.0, |vel| vel.x as f64),
+    vy: robot.vel.as_ref().map_or(0.0, |vel| vel.y as f64),
+    vz: 0.0,
+    v_angular: robot.vel_angular.unwrap_or(0.0) as f64,
+    infrared: false,
+    dribbler_on: false,
+    kick_status: Default::default(),
+    is_on: robot.visibility.is_none_or(|visibility| visibility > 0.0),
+    wheel_speeds: [0.0; 4],
+  }
+}
+
+fn replay_game_state_for_frame(
+  events: &[ReplayEvent],
+  frame_index: usize,
+) -> Option<GameStateInfo> {
+  events
+    .iter()
+    .filter(|event| event.kind == ReplayEventKind::Referee && event.frame as usize <= frame_index)
+    .next_back()
+    .map(|event| {
+      let details = event.details.as_deref().unwrap_or_default();
+      GameStateInfo {
+        command: event.label.clone(),
+        command_counter: parse_detail_value(details, "counter")
+          .and_then(|value| value.parse::<u32>().ok())
+          .unwrap_or(event.frame as u32),
+        stage: parse_detail_value(details, "stage").map(str::to_string),
+        blue_name: parse_detail_value(details, "blue")
+          .filter(|name| !name.is_empty())
+          .map(str::to_string),
+        yellow_name: parse_detail_value(details, "yellow")
+          .filter(|name| !name.is_empty())
+          .map(str::to_string),
+      }
+    })
+}
+
+fn parse_detail_value<'a>(details: &'a str, key: &str) -> Option<&'a str> {
+  details.lines().find_map(|line| {
+    let (line_key, value) = line.split_once(' ')?;
+    (line_key == key).then_some(value.trim())
+  })
+}
+
+const VISION_TRACK_ROBOT_SECONDS: f64 = 0.45;
+
+#[derive(Default)]
+struct VisionTracker {
+  ball: Option<TrackedBall>,
+  robots: HashMap<(TeamColor, usize), TrackedRobot>,
+}
+
+#[derive(Clone)]
+struct TrackedBall {
+  state: BallState,
+  sim_time: f64,
+}
+
+#[derive(Clone)]
+struct TrackedRobot {
+  state: RobotState,
+  sim_time: f64,
+}
+
+impl VisionTracker {
+  fn detection_to_state(
+    &mut self,
+    detection: &loguna::proto::SslDetectionFrame,
+    frame: u64,
+    sim_time: f64,
+  ) -> simhark::WorldState {
+    let ball = self.update_ball(detection, sim_time);
+    let blue_robots = self.update_robots(&detection.robots_blue, TeamColor::Blue, sim_time);
+    let yellow_robots = self.update_robots(&detection.robots_yellow, TeamColor::Yellow, sim_time);
+
+    simhark::WorldState {
+      world_id: 0,
+      sim_time,
+      frame,
+      ball,
+      blue_robots,
+      yellow_robots,
+      goal_blue: false,
+      goal_yellow: false,
+    }
+  }
+
+  fn update_ball(
+    &mut self,
+    detection: &loguna::proto::SslDetectionFrame,
+    sim_time: f64,
+  ) -> BallState {
+    let Some(raw_ball) = detection.balls.first() else {
+      return self.ball.as_ref().map_or(
+        BallState {
+          x: 0.0,
+          y: 0.0,
+          z: 0.0,
+          vx: 0.0,
+          vy: 0.0,
+          vz: 0.0,
+        },
+        |tracked| tracked.state.clone(),
+      );
+    };
+
+    let mut ball = BallState {
+      x: raw_ball.x as f64 / 1000.0,
+      y: raw_ball.y as f64 / 1000.0,
+      z: raw_ball.z.unwrap_or(0.0) as f64 / 1000.0,
+      vx: 0.0,
+      vy: 0.0,
+      vz: 0.0,
+    };
+    if let Some(previous) = self.ball.as_ref() {
+      let dt = (sim_time - previous.sim_time).max(1e-6);
+      ball.vx = (ball.x - previous.state.x) / dt;
+      ball.vy = (ball.y - previous.state.y) / dt;
+      ball.vz = (ball.z - previous.state.z) / dt;
+    }
+    self.ball = Some(TrackedBall {
+      state: ball.clone(),
+      sim_time,
+    });
+    ball
+  }
+
+  fn update_robots(
+    &mut self,
+    detections: &[loguna::proto::SslDetectionRobot],
+    team: TeamColor,
+    sim_time: f64,
+  ) -> Vec<RobotState> {
+    for robot in detections {
+      let id = robot.robot_id.unwrap_or(0) as usize;
+      let key = (team, id);
+      let mut state = detection_robot(robot, team);
+      if let Some(previous) = self.robots.get(&key) {
+        let dt = (sim_time - previous.sim_time).max(1e-6);
+        state.vx = (state.x - previous.state.x) / dt;
+        state.vy = (state.y - previous.state.y) / dt;
+        state.v_angular = angle_delta(state.orientation, previous.state.orientation) / dt;
+      }
+      self.robots.insert(key, TrackedRobot { state, sim_time });
+    }
+
+    let mut robots = self
+      .robots
+      .iter()
+      .filter_map(|((tracked_team, _), tracked)| {
+        if *tracked_team != team {
+          return None;
+        }
+        let age = sim_time - tracked.sim_time;
+        if age > VISION_TRACK_ROBOT_SECONDS {
+          return None;
+        }
+        let mut state = tracked.state.clone();
+        state.is_on = true;
+        if age > 0.0 {
+          state.x += state.vx * age;
+          state.y += state.vy * age;
+          state.orientation = normalize_angle(state.orientation + state.v_angular * age);
+        }
+        Some(state)
+      })
+      .collect::<Vec<_>>();
+    robots.sort_by_key(|robot| robot.id);
+    robots
+  }
 }
 
 fn apply_geometry(config: &mut WorldConfig, field: &loguna::proto::SslGeometryFieldSize) {
@@ -255,50 +591,6 @@ fn apply_geometry(config: &mut WorldConfig, field: &loguna::proto::SslGeometryFi
   }
 }
 
-fn detection_to_state(
-  detection: &loguna::proto::SslDetectionFrame,
-  frame: u64,
-  sim_time: f64,
-) -> simhark::WorldState {
-  let ball = detection.balls.first().map_or(
-    BallState {
-      x: 0.0,
-      y: 0.0,
-      z: 0.0,
-      vx: 0.0,
-      vy: 0.0,
-      vz: 0.0,
-    },
-    |ball| BallState {
-      x: ball.x as f64 / 1000.0,
-      y: ball.y as f64 / 1000.0,
-      z: ball.z.unwrap_or(0.0) as f64 / 1000.0,
-      vx: 0.0,
-      vy: 0.0,
-      vz: 0.0,
-    },
-  );
-
-  simhark::WorldState {
-    world_id: 0,
-    sim_time,
-    frame,
-    ball,
-    blue_robots: detection
-      .robots_blue
-      .iter()
-      .map(|robot| detection_robot(robot, TeamColor::Blue))
-      .collect(),
-    yellow_robots: detection
-      .robots_yellow
-      .iter()
-      .map(|robot| detection_robot(robot, TeamColor::Yellow))
-      .collect(),
-    goal_blue: false,
-    goal_yellow: false,
-  }
-}
-
 fn detection_robot(robot: &loguna::proto::SslDetectionRobot, team: TeamColor) -> RobotState {
   RobotState {
     id: robot.robot_id.unwrap_or(0) as usize,
@@ -317,6 +609,15 @@ fn detection_robot(robot: &loguna::proto::SslDetectionRobot, team: TeamColor) ->
     is_on: true,
     wheel_speeds: [0.0; 4],
   }
+}
+
+fn angle_delta(current: f64, previous: f64) -> f64 {
+  normalize_angle(current - previous)
+}
+
+fn normalize_angle(angle: f64) -> f64 {
+  let two_pi = std::f64::consts::PI * 2.0;
+  (angle + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI
 }
 
 fn estimate_tick_hz(frames: &[ReplayFrame]) -> Option<f64> {
