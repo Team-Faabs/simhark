@@ -27,6 +27,13 @@ interface FieldCanvasProps {
   onSeekReplay?: (frameIndex: number) => void;
   onScrubReplay?: (frameIndex: number) => void;
   onScrubReplayEnd?: (frameIndex?: number) => void;
+  onMoveRobot?: (
+    worldId: number,
+    team: "Blue" | "Yellow",
+    id: number,
+    x: number,
+    y: number
+  ) => void;
 }
 
 const FIELD_GREEN_LIGHT = "#1a5c34";
@@ -80,13 +87,16 @@ export default function FieldCanvas({
   onSeekReplay,
   onScrubReplay,
   onScrubReplayEnd,
+  onMoveRobot,
 }: FieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<ViewerFrame | null>(frame);
   const hitTargetsRef = useRef<RobotHitTarget[]>([]);
   const viewRef = useRef<ViewTransform>({ zoom: MIN_ZOOM, panX: 0, panY: 0 });
+  const dragRef = useRef<RobotHitTarget | null>(null);
   const [hover, setHover] = useState<RobotHover | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   // Keep latest frame in a ref so the resize observer can redraw without
   // re-binding.
@@ -256,19 +266,103 @@ export default function FieldCanvas({
     return () => observer.disconnect();
   }, [draw]);
 
-  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
-    let target: RobotHitTarget | null = null;
-    for (let index = hitTargetsRef.current.length - 1; index >= 0; index -= 1) {
-      const candidate = hitTargetsRef.current[index];
-      if (Math.hypot(candidate.x - mouseX, candidate.y - mouseY) <= candidate.radius + 6) {
-        target = candidate;
-        break;
+  const fieldPositionFromPointer = useCallback(
+    (event: PointerEvent<HTMLDivElement>): [number, number] | null => {
+      const snapshot = frameRef.current;
+      const container = containerRef.current;
+      if (!snapshot || !container) return null;
+      const rect = container.getBoundingClientRect();
+      const field = snapshot.field;
+      const halfBoundsX =
+        field.field_length / 2 + field.margin_goal_line + field.goal_depth + 0.2;
+      const halfBoundsY = field.field_width / 2 + field.margin_touch_line + 0.2;
+      const baseScale = Math.min(
+        (rect.width - 2 * PADDING) / (halfBoundsX * 2),
+        (rect.height - 2 * PADDING) / (halfBoundsY * 2)
+      );
+      const view = viewRef.current;
+      const scale = baseScale * view.zoom;
+      if (!Number.isFinite(scale) || scale <= 0) return null;
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const x = (mouseX - rect.width / 2 - view.panX) / scale;
+      const y = (rect.height / 2 + view.panY - mouseY) / scale;
+      const xLimit = Math.max(0, field.field_length / 2 - snapshot.robot_radius);
+      const yLimit = Math.max(0, field.field_width / 2 - snapshot.robot_radius);
+      return [clamp(x, -xLimit, xLimit), clamp(y, -yLimit, yLimit)];
+    },
+    []
+  );
+
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const draggedRobot = dragRef.current;
+      if (draggedRobot) {
+        const position = fieldPositionFromPointer(event);
+        if (position) {
+          onMoveRobot?.(
+            draggedRobot.worldId,
+            draggedRobot.team,
+            draggedRobot.id,
+            position[0],
+            position[1]
+          );
+        }
+        setHover(null);
+        return;
       }
+
+      const rect = event.currentTarget.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      let target: RobotHitTarget | null = null;
+      for (let index = hitTargetsRef.current.length - 1; index >= 0; index -= 1) {
+        const candidate = hitTargetsRef.current[index];
+        if (Math.hypot(candidate.x - mouseX, candidate.y - mouseY) <= candidate.radius + 6) {
+          target = candidate;
+          break;
+        }
+      }
+      setHover(target ? { ...target, mouseX, mouseY } : null);
+    },
+    [fieldPositionFromPointer, onMoveRobot]
+  );
+
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (!onMoveRobot || frameRef.current?.replay.enabled) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const target = [...hitTargetsRef.current]
+        .reverse()
+        .find(
+          (candidate) =>
+            Math.hypot(candidate.x - mouseX, candidate.y - mouseY) <=
+            candidate.radius + 6
+        );
+      if (!target) return;
+
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      dragRef.current = target;
+      setDragging(true);
+      setHover(null);
+      const position = fieldPositionFromPointer(event);
+      if (position) {
+        onMoveRobot(target.worldId, target.team, target.id, position[0], position[1]);
+      }
+    },
+    [fieldPositionFromPointer, onMoveRobot]
+  );
+
+  const handlePointerEnd = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    setHover(target ? { ...target, mouseX, mouseY } : null);
+    dragRef.current = null;
+    setDragging(false);
   }, []);
 
   const handleWheel = useCallback(
@@ -324,8 +418,13 @@ export default function FieldCanvas({
   return (
     <div
       ref={containerRef}
-      className="w-full h-full relative"
+      className={`w-full h-full relative touch-none ${
+        dragging ? "cursor-grabbing" : hover && !frame?.replay.enabled ? "cursor-grab" : ""
+      }`}
+      onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
       onPointerLeave={() => setHover(null)}
       onWheel={handleWheel}
     >
@@ -351,6 +450,9 @@ export default function FieldCanvas({
               {hover.team} {hover.id}
             </span>
             <span className="text-slate-500">world {hover.worldId}</span>
+            {!frame?.replay.enabled && (
+              <span className="ml-auto text-cyan-300">drag to move</span>
+            )}
           </div>
           <div className="max-h-24 overflow-hidden break-words font-mono leading-snug text-slate-300">
             {hover.input ?? "No recorded input for this robot in this frame"}

@@ -279,6 +279,22 @@ export function useViewerSocket(wsPort: number) {
     }
   }, []);
 
+  const moveRobot = useCallback(
+    (
+      worldId: number,
+      team: "Blue" | "Yellow",
+      id: number,
+      x: number,
+      y: number
+    ) => {
+      const socket = socketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(`robot:move:${worldId}:${team}:${id}:${x}:${y}`);
+      }
+    },
+    []
+  );
+
   const stepReplay = useCallback((delta: number) => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -330,6 +346,7 @@ export function useViewerSocket(wsPort: number) {
     selectWorlds,
     sendControl,
     setSpeed,
+    moveRobot,
     stepReplay,
     skipReplay,
     seekReplay,

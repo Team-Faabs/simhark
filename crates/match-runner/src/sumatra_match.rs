@@ -182,6 +182,13 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
 
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
+    #[cfg(feature = "viewer")]
+    if let Some(v) = &viewer
+      && v.apply_robot_move_requests(&mut engine) > 0
+    {
+      state = engine.world(0).get_state();
+    }
+
     let mut wc = director.update(&state);
     if let Some(scorer) = director.take_goal() {
       evaluator.record_goal(scorer);

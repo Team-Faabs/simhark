@@ -514,6 +514,10 @@ impl TestRunner {
         publish_batch_viewer_frame(&viewer, &batch);
       }
 
+      if viewer.apply_robot_move_requests(&mut batch.engine) > 0 {
+        batch.states = batch.engine.get_all_states();
+      }
+
       if viewer.is_running() && !batch.is_finished() {
         batch.step_once();
         viewer.set_test_suite(batch.viewer_snapshot());
@@ -564,6 +568,10 @@ impl TestRunner {
         viewer.reset_goals();
         viewer.set_test_suite(session.viewer_snapshot());
         publish_session_viewer_frame(&viewer, &session);
+      }
+
+      if viewer.apply_robot_move_requests(&mut session.batch.engine) > 0 {
+        session.batch.states = session.batch.engine.get_all_states();
       }
 
       if viewer.is_running() && !session.is_finished() {

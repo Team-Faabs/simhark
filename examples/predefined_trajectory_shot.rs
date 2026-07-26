@@ -61,6 +61,10 @@ fn main() -> Result<()> {
   let start = Instant::now();
 
   while start.elapsed() < MAX_RUNTIME {
+    if viewer.apply_robot_move_requests(&mut engine) > 0 {
+      state = engine.world(0).get_state();
+    }
+
     possession_frames = if robot(&state).infrared {
       possession_frames + 1
     } else {

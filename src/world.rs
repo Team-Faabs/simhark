@@ -576,7 +576,7 @@ impl World {
     self.holder = None;
   }
 
-  fn teleport_robot(&mut self, tr: &TeleportRobot) {
+  pub(crate) fn teleport_robot(&mut self, tr: &TeleportRobot) {
     let robot_cfg = match tr.team {
       TeamColor::Blue => &self.config.blue_robots,
       TeamColor::Yellow => &self.config.yellow_robots,

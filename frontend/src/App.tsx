@@ -64,6 +64,7 @@ export default function App() {
     selectWorlds,
     sendControl,
     setSpeed,
+    moveRobot,
     stepReplay,
     skipReplay,
     seekReplay,
@@ -193,6 +194,7 @@ export default function App() {
               onSeekReplay={seekReplay}
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
+              onMoveRobot={moveRobot}
             />
           </div>
           <div className="min-w-0 glass-panel panel-accent overflow-hidden flex flex-col">
@@ -241,6 +243,7 @@ export default function App() {
               onSeekReplay={seekReplay}
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
+              onMoveRobot={moveRobot}
             />
           </div>
         </div>

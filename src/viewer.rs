@@ -14,13 +14,13 @@ use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tungstenite::{Message, accept};
 
+use crate::command::TeleportRobot;
 use crate::config::{FieldConfig, WorldConfig};
+use crate::engine::SimulationEngine;
 #[cfg(feature = "viewer-debug")]
 use crate::replay::{ReplayDebugOverlay, ReplayDebugSnapshot};
 use crate::replay::{ReplayEvent, ReplayFrame, RobotInputInfo, robot_inputs_for_frame};
-#[cfg(feature = "viewer-debug")]
-use crate::state::TeamColor;
-use crate::state::WorldState;
+use crate::state::{TeamColor, WorldState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ViewerConfig {
@@ -177,6 +177,18 @@ struct WebControlState {
   frame_seek_requested: AtomicIsize,
 }
 
+/// A robot reposition requested by dragging it in the browser viewer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RobotMoveRequest {
+  pub world_id: usize,
+  pub team: TeamColor,
+  pub id: usize,
+  pub x: f64,
+  pub y: f64,
+}
+
+type RobotMoveKey = (usize, TeamColor, usize);
+
 #[derive(Serialize)]
 struct ControlSnapshot {
   web_enabled: bool,
@@ -252,6 +264,7 @@ pub struct ViewerServer {
   #[cfg(feature = "viewer-debug")]
   debug: Arc<Mutex<HashMap<usize, ViewerDebugSnapshot>>>,
   control: Arc<WebControlState>,
+  robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
   _http_thread: thread::JoinHandle<()>,
   _ws_thread: thread::JoinHandle<()>,
 }
@@ -299,6 +312,7 @@ impl ViewerServer {
     #[cfg(feature = "viewer-debug")]
     let debug = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(WebControlState::default());
+    let robot_move_requests = Arc::new(Mutex::new(HashMap::new()));
     control.frame_seek_requested.store(-1, Ordering::Relaxed);
     // When web control is disabled the simulator is considered always
     // running, so callers that don't opt in see the legacy behaviour.
@@ -315,6 +329,7 @@ impl ViewerServer {
       let selected_world = Arc::clone(&selected_world);
       let selected_worlds = Arc::clone(&selected_worlds);
       let control_for_ws = Arc::clone(&control);
+      let robot_move_requests = Arc::clone(&robot_move_requests);
       thread::spawn(move || {
         run_websocket_server(
           ws_listener,
@@ -322,6 +337,7 @@ impl ViewerServer {
           selected_world,
           selected_worlds,
           control_for_ws,
+          robot_move_requests,
         )
       })
     };
@@ -342,6 +358,7 @@ impl ViewerServer {
       #[cfg(feature = "viewer-debug")]
       debug,
       control,
+      robot_move_requests,
       _http_thread: http_thread,
       _ws_thread: ws_thread,
     })
@@ -407,6 +424,47 @@ impl ViewerServer {
     } else {
       Duration::from_secs_f64(base.as_secs_f64() / speed)
     }
+  }
+
+  /// Apply the latest browser drag request for each robot to its simulation
+  /// world. Returns the number of robots that were repositioned.
+  ///
+  /// Applications with a viewer should call this once per loop, including
+  /// while paused, so dragging remains responsive without advancing physics.
+  pub fn apply_robot_move_requests(&self, engine: &mut SimulationEngine) -> usize {
+    let requests = std::mem::take(&mut *self.robot_move_requests.lock());
+    let mut applied = 0;
+    for request in requests.into_values() {
+      let Some(world) = engine.worlds.get_mut(request.world_id) else {
+        continue;
+      };
+      let robot_count = match request.team {
+        TeamColor::Blue => world.blue_sims.len(),
+        TeamColor::Yellow => world.yellow_sims.len(),
+      };
+      if request.id >= robot_count {
+        continue;
+      }
+      let robot_radius = match request.team {
+        TeamColor::Blue => world.config.blue_robots.radius,
+        TeamColor::Yellow => world.config.yellow_robots.radius,
+      };
+      let x_limit = (world.config.field.field_length * 0.5 - robot_radius).max(0.0);
+      let y_limit = (world.config.field.field_width * 0.5 - robot_radius).max(0.0);
+      world.teleport_robot(&TeleportRobot {
+        id: request.id,
+        team: request.team,
+        x: Some(request.x.clamp(-x_limit, x_limit)),
+        y: Some(request.y.clamp(-y_limit, y_limit)),
+        orientation: None,
+        vx: Some(0.0),
+        vy: Some(0.0),
+        v_angular: Some(0.0),
+        present: None,
+      });
+      applied += 1;
+    }
+    applied
   }
 
   pub fn selected_world(&self) -> usize {
@@ -892,6 +950,7 @@ fn run_websocket_server(
   selected_world: Arc<AtomicUsize>,
   selected_worlds: Arc<Mutex<Vec<usize>>>,
   control: Arc<WebControlState>,
+  robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
 ) {
   for stream in listener.incoming() {
     let Ok(stream) = stream else {
@@ -902,6 +961,7 @@ fn run_websocket_server(
     let selected_world = Arc::clone(&selected_world);
     let selected_worlds = Arc::clone(&selected_worlds);
     let control = Arc::clone(&control);
+    let robot_move_requests = Arc::clone(&robot_move_requests);
     thread::spawn(move || {
       let Ok(mut websocket) = accept(stream) else {
         return;
@@ -916,9 +976,13 @@ fn run_websocket_server(
         let mut close_requested = false;
         loop {
           match websocket.read() {
-            Ok(Message::Text(text)) => {
-              handle_client_message(text.as_str(), &selected_world, &selected_worlds, &control)
-            }
+            Ok(Message::Text(text)) => handle_client_message(
+              text.as_str(),
+              &selected_world,
+              &selected_worlds,
+              &control,
+              &robot_move_requests,
+            ),
             Ok(Message::Close(_)) => {
               close_requested = true;
               break;
@@ -966,6 +1030,7 @@ fn handle_client_message(
   selected_world: &AtomicUsize,
   selected_worlds: &Mutex<Vec<usize>>,
   control: &WebControlState,
+  robot_move_requests: &Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>,
 ) {
   if let Some(value) = message.strip_prefix("world:") {
     if let Ok(index) = value.trim().parse::<usize>() {
@@ -1056,7 +1121,38 @@ fn handle_client_message(
         .frame_seek_requested
         .store(frame.max(0), Ordering::Relaxed);
     }
+    return;
   }
+
+  if let Some(request) = parse_robot_move_request(message) {
+    robot_move_requests
+      .lock()
+      .insert((request.world_id, request.team, request.id), request);
+  }
+}
+
+fn parse_robot_move_request(message: &str) -> Option<RobotMoveRequest> {
+  let value = message.strip_prefix("robot:move:")?;
+  let mut parts = value.split(':');
+  let world_id = parts.next()?.parse().ok()?;
+  let team = match parts.next()? {
+    "Blue" => TeamColor::Blue,
+    "Yellow" => TeamColor::Yellow,
+    _ => return None,
+  };
+  let id = parts.next()?.parse().ok()?;
+  let x = parts.next()?.parse::<f64>().ok()?;
+  let y = parts.next()?.parse::<f64>().ok()?;
+  if parts.next().is_some() || !x.is_finite() || !y.is_finite() {
+    return None;
+  }
+  Some(RobotMoveRequest {
+    world_id,
+    team,
+    id,
+    x,
+    y,
+  })
 }
 
 fn parse_world_selection(value: &str) -> Vec<usize> {
@@ -1112,5 +1208,35 @@ fn render_index(ws_port: u16) -> String {
   } else {
     // No </head> tag — fall back to prepending the script to the body.
     format!("{injected}{FRONTEND_HTML}")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{RobotMoveRequest, parse_robot_move_request};
+  use crate::state::TeamColor;
+
+  #[test]
+  fn parses_robot_move_request() {
+    assert_eq!(
+      parse_robot_move_request("robot:move:3:Yellow:7:-1.25:2.5"),
+      Some(RobotMoveRequest {
+        world_id: 3,
+        team: TeamColor::Yellow,
+        id: 7,
+        x: -1.25,
+        y: 2.5,
+      })
+    );
+  }
+
+  #[test]
+  fn rejects_invalid_robot_move_request() {
+    assert_eq!(parse_robot_move_request("robot:move:0:Green:1:0:0"), None);
+    assert_eq!(parse_robot_move_request("robot:move:0:Blue:1:NaN:0"), None);
+    assert_eq!(
+      parse_robot_move_request("robot:move:0:Blue:1:0:0:extra"),
+      None
+    );
   }
 }

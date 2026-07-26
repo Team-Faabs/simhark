@@ -81,6 +81,7 @@ fn main() {
     #[cfg(feature = "viewer")]
     if let Some(viewer) = viewer.as_ref() {
       loop {
+        viewer.apply_robot_move_requests(&mut engine);
         server
           .step(&mut engine)
           .expect("grSim compatibility server step failed");
@@ -100,6 +101,7 @@ fn main() {
   #[cfg(feature = "viewer")]
   if let Some(viewer) = viewer.as_ref() {
     for step in 0..num_steps {
+      viewer.apply_robot_move_requests(&mut engine);
       let command = demo_command(step, num_worlds);
       engine.advance_with_commands(&command);
 

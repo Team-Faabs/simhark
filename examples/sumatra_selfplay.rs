@@ -80,6 +80,8 @@ fn main() -> Result<()> {
       }
     }
 
+    viewer.apply_robot_move_requests(&mut engine);
+
     if web_control && !viewer.is_running() {
       // Still publish the latest world snapshot so the UI stays
       // responsive while paused.

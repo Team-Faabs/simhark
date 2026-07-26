@@ -204,6 +204,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
 
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
+    #[cfg(feature = "viewer")]
+    if let Some(v) = &viewer
+      && v.apply_robot_move_requests(&mut engine) > 0
+    {
+      state = engine.world(0).get_state();
+    }
+
     let gc_blue = director.command_for(TeamColor::Blue);
     let gc_yellow = director.command_for(TeamColor::Yellow);
     let blue_cmds = blue_ctrl
