@@ -2,6 +2,8 @@
 //! controller / director / evaluator / logging building blocks.
 
 pub mod controller;
+#[cfg(feature = "dehumanized")]
+mod direct_dehumanized;
 pub mod director;
 pub mod evaluator;
 pub mod logio;

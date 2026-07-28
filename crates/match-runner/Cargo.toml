@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 simhark = { path = "../.." }
-simhark_faabs = { path = "../simhark_faabs" }
+simhark_faabs = { path = "../simhark_faabs", optional = true }
 simhark-sumatra = { path = "../simhark-sumatra", optional = true }
 loguna = { git = "https://github.com/Technulgy-LGNU/loguna" }
 core_dump = { git = "https://github.com/Technulgy-LGNU/core-dump" }
@@ -27,15 +27,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 bangka = { path = "../../../bangka/bangka", optional = true }
 bongka = { path = "../../../bangka/bongka", optional = true }
 ungabunga = { path = "../../../bangka/ungabunga", optional = true }
+dehumanized = { path = "../../../dehumanized", optional = true }
 
 [features]
 default = ["bangka", "bongka", "ungabunga", "sim-time"]
-bangka = ["dep:bangka"]
-bongka = ["dep:bongka"]
-ungabunga = ["dep:ungabunga"]
+faabs = ["dep:simhark_faabs"]
+bangka = ["faabs", "dep:bangka"]
+bongka = ["faabs", "dep:bongka"]
+ungabunga = ["faabs", "dep:ungabunga"]
+dehumanized = ["dep:dehumanized"]
 viewer = ["simhark/viewer"]
-viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs/viewer-debug"]
-sim-time = ["simhark_faabs/sim-time"]
+viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs?/viewer-debug"]
+sim-time = ["faabs", "simhark_faabs/sim-time"]
 sumatra = ["dep:simhark-sumatra"]
 referris = ["dep:referris"]
 validator = ["referris"]

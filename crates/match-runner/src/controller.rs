@@ -1,13 +1,23 @@
-//! Team controllers. Every AI runs *inside CrashPilot* and reaches simhark only
-//! through the `simhark_faabs` binding (CrashPilot -> tf_jetsoncode firmware ->
-//! simhark). A controller just wraps a `Faabs<A>` for one team colour.
+//! Team controllers. Legacy AIs run through the full CrashPilot/faabs stack.
+//! Dehumanized can also run directly against simhark while the 2027
+//! CrashPilot/robot protocol is still under development.
 
+#[cfg(feature = "faabs")]
 use core_dump::proto::Referee;
+#[cfg(feature = "faabs")]
 use core_dump::types::Ai;
-use simhark::{MoveCommand, RobotCommand, TeamColor, WorldCommand, WorldConfig, WorldState};
+#[cfg(feature = "faabs")]
+use simhark::WorldCommand;
+use simhark::{MoveCommand, RobotCommand, TeamColor, WorldConfig, WorldState};
+#[cfg(feature = "faabs")]
 use simhark_faabs::Faabs;
+#[cfg(feature = "faabs")]
 use simhark_faabs::crashpilot::{FieldSide, GameStartOptions, GameTeam};
+#[cfg(feature = "faabs")]
 use simhark_faabs::synth::{force_start_referee, referee_command};
+
+#[cfg(feature = "dehumanized")]
+use crate::direct_dehumanized::DirectDehumanizedController;
 
 /// Referee state resolved relative to a team, as decided by the match director.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +46,7 @@ pub trait Controller {
   ) -> Vec<RobotCommand>;
 }
 
+#[cfg(feature = "faabs")]
 fn referee_for(gc: GameCommand) -> Option<Referee> {
   match gc {
     GameCommand::Halt => Some(referee_command(0)), // HALT
@@ -46,11 +57,13 @@ fn referee_for(gc: GameCommand) -> Option<Referee> {
 }
 
 /// Wraps a `Faabs<A>` (a CrashPilot AI bound into simhark) as a `Controller`.
+#[cfg(feature = "faabs")]
 pub struct FaabsController<A: Ai> {
   faabs: Faabs<A>,
   name: String,
 }
 
+#[cfg(feature = "faabs")]
 fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
   // Preserve simhark_faabs' existing side convention:
   // yellow uses x+, blue uses x-.
@@ -61,6 +74,7 @@ fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
   faabs.crash_pilot.start_game(options);
 }
 
+#[cfg(feature = "faabs")]
 impl<A: Ai + Send> Controller for FaabsController<A> {
   fn name(&self) -> &str {
     &self.name
@@ -133,6 +147,8 @@ pub enum TeamKind {
   BangkaLegacy,
   /// CrashPilot's machine-learning AI.
   CrashPilot { model: Option<String> },
+  /// Dehumanized connected directly to simhark, without CrashPilot or ORCA.
+  Dehumanized,
   /// No-op side: keeps robots idle with zero wheel velocity.
   Dummy,
   /// The real Sumatra (external Java AI), driven over the SimNet protocol.
@@ -153,6 +169,7 @@ impl TeamKind {
       "bangka1" => Ok(TeamKind::Bangka1),
       "legacy" | "bangka0" | "baseline" => Ok(TeamKind::BangkaLegacy),
       "crashpilot" | "cp" | "ml" | "ai" => Ok(TeamKind::CrashPilot { model: arg }),
+      "dehumanized" | "dehumanized-direct" | "deh" => Ok(TeamKind::Dehumanized),
       "dummy" | "noop" | "none" | "idle" => Ok(TeamKind::Dummy),
       "sumatra" | "real" | "tigers" => Ok(TeamKind::Sumatra),
       other => Err(format!("unknown team kind: {other}")),
@@ -167,6 +184,7 @@ impl TeamKind {
       TeamKind::Bangka1 => "bangka1",
       TeamKind::BangkaLegacy => "legacy",
       TeamKind::CrashPilot { .. } => "crashpilot",
+      TeamKind::Dehumanized => "dehumanized",
       TeamKind::Dummy => "dummy",
       TeamKind::Sumatra => "sumatra",
     }
@@ -181,15 +199,27 @@ impl TeamKind {
   /// True for in-process sides that go through CrashPilot/faabs and therefore
   /// inherit CrashPilot's current robot-count limit.
   pub fn uses_crashpilot_binding(&self) -> bool {
-    !matches!(self, TeamKind::Dummy | TeamKind::Sumatra)
+    !matches!(
+      self,
+      TeamKind::Dehumanized | TeamKind::Dummy | TeamKind::Sumatra
+    )
   }
 }
 
 /// Build a faabs controller for an in-process side. Panics for external kinds
 /// (e.g. [`TeamKind::Sumatra`]); `run_match` must route those separately.
 pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Box<dyn Controller> {
+  #[cfg(not(feature = "faabs"))]
+  let _ = color;
+
   match kind {
     TeamKind::Dummy => Box::new(DummyController { num_robots }),
+    #[cfg(not(feature = "dehumanized"))]
+    TeamKind::Dehumanized => {
+      panic!("Dehumanized is disabled; build with `--features dehumanized` to enable")
+    }
+    #[cfg(feature = "dehumanized")]
+    TeamKind::Dehumanized => Box::new(DirectDehumanizedController::new(num_robots)),
     #[cfg(not(feature = "bangka"))]
     TeamKind::Bangka => panic!("Bangka is disabled; build with `--features bangka` to enable"),
     #[cfg(feature = "bangka")]
@@ -202,7 +232,9 @@ pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Bo
       })
     }
     #[cfg(not(feature = "bongka"))]
-    TeamKind::Bongka => panic!("Bongka is disabled; build with `--features bongka` to enable"),
+    TeamKind::Bongka { .. } => {
+      panic!("Bongka is disabled; build with `--features bongka` to enable")
+    }
     #[cfg(feature = "bongka")]
     TeamKind::Bongka { params } => {
       let p = params
@@ -299,6 +331,14 @@ mod tests {
   fn dummy_aliases_parse_to_dummy() {
     for name in ["dummy", "noop", "none", "idle"] {
       assert!(matches!(TeamKind::parse(name), Ok(TeamKind::Dummy)));
+    }
+  }
+
+  #[cfg(feature = "dehumanized")]
+  #[test]
+  fn dehumanized_aliases_parse_to_direct_controller() {
+    for name in ["dehumanized", "dehumanized-direct", "deh"] {
+      assert!(matches!(TeamKind::parse(name), Ok(TeamKind::Dehumanized)));
     }
   }
 
