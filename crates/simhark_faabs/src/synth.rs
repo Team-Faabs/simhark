@@ -1,6 +1,6 @@
 use core_dump::proto::{
-  CpMode, InterfaceCommandCp, InterfaceGameCp, InterfaceManualCp, InterfaceTestCp,
-  InterfaceWrapperCp,
+  CrashpilotInterfaceCommand, CrashpilotInterfaceGame, CrashpilotInterfaceInput,
+  CrashpilotInterfaceManual, CrashpilotInterfaceTest, CrashpilotMode,
 };
 use simhark::TeamColor;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,27 +27,27 @@ pub fn force_start_referee() -> core_dump::proto::Referee {
   referee_command(3) // FORCE_START
 }
 
-pub fn interface_command(team: TeamColor) -> InterfaceWrapperCp {
+pub fn interface_command(team: TeamColor) -> CrashpilotInterfaceInput {
   let (team_color, side) = match team {
     TeamColor::Yellow => (false, false),
     TeamColor::Blue => (true, true),
   };
-  InterfaceWrapperCp {
+  CrashpilotInterfaceInput {
     robot_commands: Vec::new(),
-    interface_command: InterfaceCommandCp {
+    interface_command: CrashpilotInterfaceCommand {
       team_color,
       side,
-      mode: CpMode::ModeGame as i32,
-      manual: InterfaceManualCp {
+      mode: CrashpilotMode::Game as i32,
+      manual: CrashpilotInterfaceManual {
         ball_tracked: true,
         ..Default::default()
       },
-      game: InterfaceGameCp {
+      game: CrashpilotInterfaceGame {
         running: true,
         goalkeeper_id: 0,
         max_speed: 0,
       },
-      test: InterfaceTestCp::default(),
+      test: CrashpilotInterfaceTest::default(),
     },
   }
 }

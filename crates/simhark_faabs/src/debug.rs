@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use core_dump::proto::{CpCommand, CpRobot, CpState, CpTask, Referee};
+use core_dump::proto::{
+  CrashpilotCommand, CrashpilotRobot, CrashpilotState, CrashpilotTask, Referee,
+};
 use core_dump::types::RobotCommand as AiRobotCommand;
 use core_dump::vec::types::Vec2;
 use simhark::state::RobotState;
@@ -14,7 +16,7 @@ pub fn robot_debug_info(
   id: u32,
   team: TeamColor,
   ai_command: Option<AiRobotCommand>,
-  cp: &CpRobot,
+  cp: &CrashpilotRobot,
   teensy: &TeensySendMsg,
   state: &WorldState,
 ) -> RobotDebugInfo {
@@ -39,15 +41,15 @@ pub fn robot_debug_overlays(
   id: u32,
   team: TeamColor,
   ai_command: Option<AiRobotCommand>,
-  command: &CpCommand,
+  command: &CrashpilotCommand,
   state: &WorldState,
 ) -> Vec<DebugOverlay> {
   let color = debug_color(ai_command, command);
-  match CpTask::try_from(command.task).ok() {
-    Some(CpTask::TaskPos) => target_overlay(id, team, ai_command, command, color)
+  match CrashpilotTask::try_from(command.task).ok() {
+    Some(CrashpilotTask::Pos) => target_overlay(id, team, ai_command, command, color)
       .into_iter()
       .collect(),
-    Some(CpTask::TaskKick) | Some(CpTask::TaskChip) | Some(CpTask::TaskRecKick) => {
+    Some(CrashpilotTask::Kick) | Some(CrashpilotTask::Chip) | Some(CrashpilotTask::RecKick) => {
       let mut overlays = kick_line_angle(id, team, ai_command, command, state)
         .map(|angle| {
           vec![DebugOverlay::KickLine(DebugKickLine {
@@ -82,7 +84,7 @@ fn target_overlay(
   id: u32,
   team: TeamColor,
   ai_command: Option<AiRobotCommand>,
-  command: &CpCommand,
+  command: &CrashpilotCommand,
   color: String,
 ) -> Option<DebugOverlay> {
   let pos = command.pos.as_ref()?;
@@ -109,7 +111,7 @@ fn kick_line_angle(
   id: u32,
   team: TeamColor,
   ai_command: Option<AiRobotCommand>,
-  command: &CpCommand,
+  command: &CrashpilotCommand,
   state: &WorldState,
 ) -> Option<f64> {
   if matches!(ai_command, Some(AiRobotCommand::RecPass)) {
@@ -125,7 +127,7 @@ fn kick_line_angle(
     .kick_orient
     .map(|angle| (angle as f64).to_radians())
     .or_else(|| {
-      if command.task == CpTask::TaskRecKick as i32 {
+      if command.task == CrashpilotTask::RecKick as i32 {
         moving_ball_angle(state)
       } else {
         None
@@ -230,7 +232,7 @@ fn format_task_counts(counts: &BTreeMap<&str, usize>) -> String {
 
 fn robot_message(
   ai_command: Option<AiRobotCommand>,
-  command: &CpCommand,
+  command: &CrashpilotCommand,
   teensy: &TeensySendMsg,
   robot: Option<&RobotState>,
 ) -> String {
@@ -289,7 +291,7 @@ fn robot_message(
 }
 
 fn firmware_action(teensy: &TeensySendMsg) -> String {
-  if teensy.state == CpState::StateHalt as u8 {
+  if teensy.state == CrashpilotState::Halt as u8 {
     return "halted".to_string();
   }
 
@@ -314,8 +316,8 @@ fn firmware_action(teensy: &TeensySendMsg) -> String {
   parts.join("; ")
 }
 
-fn task_label(command: &CpCommand) -> String {
-  CpTask::try_from(command.task)
+fn task_label(command: &CrashpilotCommand) -> String {
+  CrashpilotTask::try_from(command.task)
     .map(|task| task.as_str_name())
     .unwrap_or("TASK_UNKNOWN")
     .trim_start_matches("TASK_")
@@ -324,33 +326,33 @@ fn task_label(command: &CpCommand) -> String {
 }
 
 fn state_label(state: i32) -> &'static str {
-  CpState::try_from(state)
+  CrashpilotState::try_from(state)
     .map(|state| state.as_str_name())
     .unwrap_or("STATE_UNKNOWN")
 }
 
-fn task_color(command: &CpCommand) -> String {
-  if command.state == CpState::StateHalt as i32 {
+fn task_color(command: &CrashpilotCommand) -> String {
+  if command.state == CrashpilotState::Halt as i32 {
     return "#64748b".to_string();
   }
 
-  let color = match CpTask::try_from(command.task).ok() {
-    Some(CpTask::TaskPos) => "#38bdf8",
-    Some(CpTask::TaskKick) => "#ef4444",
-    Some(CpTask::TaskChip) => "#f97316",
-    Some(CpTask::TaskRecKick) => "#22c55e",
-    Some(CpTask::TaskSteal) => "#eab308",
-    Some(CpTask::TaskDribble) => "#a855f7",
-    Some(CpTask::TaskPosBall) => "#14b8a6",
-    Some(CpTask::TaskBlock) => "#6366f1",
-    Some(CpTask::StateKickoff) => "#ec4899",
-    Some(CpTask::StateFreekick) => "#f59e0b",
+  let color = match CrashpilotTask::try_from(command.task).ok() {
+    Some(CrashpilotTask::Pos) => "#38bdf8",
+    Some(CrashpilotTask::Kick) => "#ef4444",
+    Some(CrashpilotTask::Chip) => "#f97316",
+    Some(CrashpilotTask::RecKick) => "#22c55e",
+    Some(CrashpilotTask::Steal) => "#eab308",
+    Some(CrashpilotTask::Dribble) => "#a855f7",
+    Some(CrashpilotTask::PosBall) => "#14b8a6",
+    Some(CrashpilotTask::Block) => "#6366f1",
+    Some(CrashpilotTask::Kickoff) => "#ec4899",
+    Some(CrashpilotTask::Freekick) => "#f59e0b",
     _ => "#94a3b8",
   };
   color.to_string()
 }
 
-fn debug_color(ai_command: Option<AiRobotCommand>, cp_command: &CpCommand) -> String {
+fn debug_color(ai_command: Option<AiRobotCommand>, cp_command: &CrashpilotCommand) -> String {
   ai_command
     .map(ai_task_color)
     .unwrap_or_else(|| task_color(cp_command))

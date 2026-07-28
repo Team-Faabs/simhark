@@ -1,6 +1,6 @@
 use crashpilot::Config;
 use crashpilot::communication::WebsocketOut;
-use crashpilot::core_dump::proto::InterfaceWrapperCp;
+use crashpilot::core_dump::proto::CrashpilotInterfaceInput;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Bytes;
 
-pub type EventShare = Arc<Mutex<Option<InterfaceWrapperCp>>>;
+pub type EventShare = Arc<Mutex<Option<CrashpilotInterfaceInput>>>;
 
 pub async fn spawn_websocket(cfg: &Config, tx: EventShare, ws_out: WebsocketOut) {
   let addr = format!(
@@ -82,7 +82,7 @@ pub async fn spawn_websocket(cfg: &Config, tx: EventShare, ws_out: WebsocketOut)
             Ok(msg) if msg.is_binary() => {
               let data = msg.into_data();
 
-              match InterfaceWrapperCp::decode(&*data) {
+              match CrashpilotInterfaceInput::decode(&*data) {
                 Ok(decoded) => {
                   let mut lock = tx.lock().await;
 

@@ -1,4 +1,4 @@
-use core_dump::proto::CpState;
+use core_dump::proto::CrashpilotState;
 use simhark::{DEFAULT_KICK_SPEED, MoveCommand, RobotCommand, TeamColor, WorldCommand};
 use tf_jetsoncode::{TeensySendMsg, send_flags};
 
@@ -20,7 +20,7 @@ pub fn run_sim_action(
     TeamColor::Blue => &mut command.blue,
   };
 
-  if teensy.state == CpState::StateHalt as u8 {
+  if teensy.state == CrashpilotState::Halt as u8 {
     team_cmds.push(RobotCommand {
       id,
       move_command: Some(MoveCommand::GlobalVelocity {

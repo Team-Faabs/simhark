@@ -1,4 +1,4 @@
-use crashpilot::core_dump::proto::CpInfos;
+use crashpilot::core_dump::proto::CrashpilotInfos;
 use simhark::{RobotState, TeamColor, WorldCommand, WorldConfig, WorldState};
 use simhark_faabs::run_sim_action;
 use simhark_testing::{
@@ -7,8 +7,8 @@ use simhark_testing::{
 };
 use std::borrow::Cow;
 use tf_jetsoncode::{
-  Config, CpBall, CpCommand, CpRobot, CpState, CpTrackedRobot, CpVector2, Events, Robot,
-  TeensyRecMSG,
+  Config, CrashpilotBall, CrashpilotCommand, CrashpilotRobot, CrashpilotState,
+  CrashpilotTrackedRobot, CrashpilotVector2, Events, Robot, TeensyRecMSG,
 };
 
 const GOALIE_ID: usize = 0;
@@ -253,14 +253,14 @@ fn goalie_events(state: &WorldState) -> Events {
   }
 }
 
-fn cp_robot(state: &WorldState) -> CpRobot {
+fn cp_robot(state: &WorldState) -> CrashpilotRobot {
   let config = WorldConfig::division_b();
 
-  CpRobot {
+  CrashpilotRobot {
     robot_id: GOALIE_ID as u32,
     timestamp: state.sim_time,
     packet_id: state.frame as u32,
-    ball: CpBall {
+    ball: CrashpilotBall {
       pos: cp_vec(state.ball.x, state.ball.y),
       vel: Some(cp_vec(state.ball.vx, state.ball.vy)),
     },
@@ -274,11 +274,11 @@ fn cp_robot(state: &WorldState) -> CpRobot {
       .iter()
       .map(cp_tracked_robot)
       .collect::<Vec<_>>(),
-    cmd: CpCommand {
-      state: CpState::StateGoalie as i32,
-      ..CpCommand::default()
+    cmd: CrashpilotCommand {
+      state: CrashpilotState::Goalie as i32,
+      ..CrashpilotCommand::default()
     },
-    infos: CpInfos {
+    infos: CrashpilotInfos {
       team_color: false,
       team_site: true,
       width: meters_to_mm_u32(config.field.field_length),
@@ -291,8 +291,8 @@ fn cp_robot(state: &WorldState) -> CpRobot {
   }
 }
 
-fn cp_tracked_robot(robot: &RobotState) -> CpTrackedRobot {
-  CpTrackedRobot {
+fn cp_tracked_robot(robot: &RobotState) -> CrashpilotTrackedRobot {
+  CrashpilotTrackedRobot {
     robot_id: robot.id as u32,
     pos: cp_vec(robot.x, robot.y),
     orientation: robot.orientation.to_degrees() as i32,
@@ -301,8 +301,8 @@ fn cp_tracked_robot(robot: &RobotState) -> CpTrackedRobot {
   }
 }
 
-fn cp_vec(x: f64, y: f64) -> CpVector2 {
-  CpVector2 {
+fn cp_vec(x: f64, y: f64) -> CrashpilotVector2 {
+  CrashpilotVector2 {
     x: meters_to_mm_i32(x),
     y: meters_to_mm_i32(y),
   }

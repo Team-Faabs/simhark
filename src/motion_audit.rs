@@ -495,6 +495,8 @@ fn no_robot_should_affect_ball(state: &WorldState, config: &WorldConfig) -> bool
 
 #[cfg(test)]
 mod tests {
+  use super::audit_world;
+  use crate::config::WorldConfig;
   use crate::state::{BallState, KickStatus, RobotState, TeamColor, WorldState};
 
   fn robot(id: usize, team: TeamColor, x: f64, y: f64) -> RobotState {

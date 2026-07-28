@@ -869,10 +869,10 @@ mod tests {
     };
 
     let expected = [
-      0.54 / robot_cfg.wheel_radius,
-      2.16 / robot_cfg.wheel_radius,
-      1.62 / robot_cfg.wheel_radius,
-      1.08 / robot_cfg.wheel_radius,
+      0.54_f32 as f64 / robot_cfg.wheel_radius,
+      2.16_f32 as f64 / robot_cfg.wheel_radius,
+      1.62_f32 as f64 / robot_cfg.wheel_radius,
+      1.08_f32 as f64 / robot_cfg.wheel_radius,
     ];
     for (got, want) in wheels.into_iter().zip(expected) {
       assert!((got - want).abs() < 1e-9);
