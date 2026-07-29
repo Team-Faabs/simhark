@@ -217,6 +217,25 @@ impl TeamKind {
   }
 }
 
+/// In-process controller kinds available in this build for live replacement.
+///
+/// External controllers such as Sumatra deliberately stay out of this list:
+/// changing the SimNet process topology mid-match is a different lifecycle
+/// from replacing one boxed in-process controller.
+pub fn hot_swappable_team_kinds() -> Vec<&'static str> {
+  let mut kinds = Vec::new();
+  #[cfg(feature = "bangka")]
+  kinds.push("bangka");
+  #[cfg(feature = "bongka")]
+  kinds.push("bongka");
+  #[cfg(feature = "ungabunga")]
+  kinds.extend(["ungabunga", "bangka1", "legacy"]);
+  #[cfg(feature = "dehumanized")]
+  kinds.push("dehumanized");
+  kinds.push("dummy");
+  kinds
+}
+
 /// Build a faabs controller for an in-process side. Panics for external kinds
 /// (e.g. [`TeamKind::Sumatra`]); `run_match` must route those separately.
 pub fn build_controller(kind: &TeamKind, color: TeamColor, num_robots: u8) -> Box<dyn Controller> {
@@ -343,6 +362,13 @@ mod tests {
     for name in ["dummy", "noop", "none", "idle"] {
       assert!(matches!(TeamKind::parse(name), Ok(TeamKind::Dummy)));
     }
+  }
+
+  #[test]
+  fn external_ais_are_not_hot_swappable() {
+    let kinds = hot_swappable_team_kinds();
+    assert!(kinds.contains(&"dummy"));
+    assert!(!kinds.contains(&"sumatra"));
   }
 
   #[cfg(feature = "dehumanized")]

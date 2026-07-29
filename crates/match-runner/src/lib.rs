@@ -12,13 +12,17 @@ pub mod referris_autoref;
 #[cfg(feature = "sumatra")]
 pub mod sumatra_match;
 
+#[cfg(feature = "viewer")]
+use controller::hot_swappable_team_kinds;
 use controller::{TeamKind, build_controller};
 use director::MatchDirector;
 use evaluator::{Evaluator, MatchReport};
 use logio::GameLog;
+#[cfg(feature = "viewer-debug")]
+use simhark::ReplayDebugSnapshot;
 use simhark::{
-  MoveCommand, ReplayDebugSnapshot, ReplayLog, ReplayRecorder, RobotCommand, RobotState,
-  SimulationEngine, TeamColor, WorldConfig, WorldState,
+  MoveCommand, ReplayLog, ReplayRecorder, RobotCommand, RobotState, SimulationEngine, TeamColor,
+  WorldConfig, WorldState,
 };
 
 #[cfg(feature = "sim-time")]
@@ -44,6 +48,10 @@ pub struct MatchConfig {
   pub viewer: bool,
   /// Pace the simulation to ~60 Hz wall-clock (implied by `viewer`).
   pub realtime: bool,
+  /// Run an unlimited, viewer-backed development match with live controls.
+  pub dev: bool,
+  /// Recover a ball that has made no progress by teleporting it to the centre.
+  pub teleport_ball_on_no_progress: bool,
   /// Print simulator-level robot commands at a throttled interval.
   pub print_commands: bool,
   /// Frame interval for command printing.
@@ -68,6 +76,8 @@ impl Default for MatchConfig {
       quiet: false,
       viewer: false,
       realtime: false,
+      dev: false,
+      teleport_ball_on_no_progress: true,
       print_commands: false,
       print_commands_every: 60,
       validate_pickup: false,
@@ -121,10 +131,32 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   #[cfg(feature = "sim-time")]
   let _fixed_firmware_dt = FixedFirmwareDt::enable();
 
+  #[cfg(not(feature = "viewer"))]
+  if mc.dev {
+    eprintln!("development matches require building match-runner with `--features viewer`");
+    let cfg = world_config(mc.div, mc.seed);
+    return Evaluator::new(
+      cfg,
+      format!("blue:{}", mc.blue.label()),
+      format!("yellow:{}", mc.yellow.label()),
+    )
+    .finish(0.0);
+  }
+
   let default_bots = world_config(mc.div, mc.seed).robots_per_team;
   let route_bots = mc.bot_counts(default_bots);
   let has_active_external = (route_bots.blue > 0 && mc.blue.is_external())
     || (route_bots.yellow > 0 && mc.yellow.is_external());
+  if mc.dev && has_active_external {
+    eprintln!("--dev does not support matches containing Sumatra; use in-process AIs only");
+    let cfg = world_config(mc.div, mc.seed);
+    return Evaluator::new(
+      cfg,
+      format!("blue:{}", mc.blue.label()),
+      format!("yellow:{}", mc.yellow.label()),
+    )
+    .finish(0.0);
+  }
   if has_active_external {
     #[cfg(feature = "sumatra")]
     return sumatra_match::run(mc);
@@ -162,8 +194,10 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     side_name(&mc.yellow, yellow_ctrl.as_deref(), bots.yellow)
   );
 
-  let mut director = MatchDirector::new(cfg.clone(), mc.seconds)
+  let duration = if mc.dev { f64::INFINITY } else { mc.seconds };
+  let mut director = MatchDirector::new(cfg.clone(), duration)
     .with_bot_counts(physical_bots.blue, physical_bots.yellow);
+  director.set_teleport_ball_on_no_progress(mc.teleport_ball_on_no_progress);
   let mut evaluator = Evaluator::new(cfg.clone(), blue_name.clone(), yellow_name.clone());
   #[cfg(feature = "referris")]
   let mut referris = referris_autoref::ReferrisAutoref::new();
@@ -175,12 +209,22 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   };
 
   #[cfg(feature = "viewer")]
-  let viewer = if mc.viewer && mc.replay.is_none() {
+  let viewer = if (mc.viewer || mc.dev) && mc.replay.is_none() {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
-        configure_developer_console(&v, blue_ctrl.as_deref(), yellow_ctrl.as_deref());
-        println!("viewer: {}", vc.http_url());
+        configure_developer_console(
+          &v,
+          mc.dev,
+          blue_ctrl.as_deref(),
+          yellow_ctrl.as_deref(),
+          director.teleport_ball_on_no_progress(),
+        );
+        if mc.dev {
+          println!("dev viewer: {}/dev", vc.http_url());
+        } else {
+          println!("viewer: {}", vc.http_url());
+        }
         Some(v)
       }
       Err(e) => {
@@ -191,7 +235,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   } else {
     None
   };
-  let pace = mc.replay.is_none() && (mc.realtime || mc.viewer);
+  let pace = mc.replay.is_none() && (mc.realtime || mc.viewer || mc.dev);
 
   let kickoff = director.kickoff_reset();
   let mut state = engine
@@ -209,7 +253,26 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
-      apply_developer_requests(v, &mut blue_ctrl, &mut yellow_ctrl);
+      apply_developer_requests(
+        v,
+        mc.dev,
+        &mut blue_ctrl,
+        &mut yellow_ctrl,
+        bots,
+        &mut director,
+      );
+      if mc.dev {
+        let current_blue_name = format!(
+          "blue:{}",
+          side_name(&mc.blue, blue_ctrl.as_deref(), bots.blue)
+        );
+        let current_yellow_name = format!(
+          "yellow:{}",
+          side_name(&mc.yellow, yellow_ctrl.as_deref(), bots.yellow)
+        );
+        evaluator.set_team_name(TeamColor::Blue, current_blue_name);
+        evaluator.set_team_name(TeamColor::Yellow, current_yellow_name);
+      }
       if v.apply_robot_move_requests(&mut engine) > 0 {
         state = engine.world(0).get_state();
       }
@@ -289,12 +352,32 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
       #[cfg(feature = "referris")]
+      let published_blue_name = mc
+        .dev
+        .then(|| {
+          format!(
+            "blue:{}",
+            side_name(&mc.blue, blue_ctrl.as_deref(), bots.blue)
+          )
+        })
+        .unwrap_or_else(|| blue_name.clone());
+      #[cfg(feature = "referris")]
+      let published_yellow_name = mc
+        .dev
+        .then(|| {
+          format!(
+            "yellow:{}",
+            side_name(&mc.yellow, yellow_ctrl.as_deref(), bots.yellow)
+          )
+        })
+        .unwrap_or_else(|| yellow_name.clone());
+      #[cfg(feature = "referris")]
       v.set_game_state(simhark::viewer::GameStateInfo {
         command: referris_tick.command_label.to_string(),
         command_counter: referris_tick.command_counter,
         stage: None,
-        blue_name: Some(blue_name.clone()),
-        yellow_name: Some(yellow_name.clone()),
+        blue_name: Some(published_blue_name),
+        yellow_name: Some(published_yellow_name),
       });
       #[cfg(feature = "viewer-debug")]
       publish_controller_debug(
@@ -324,20 +407,63 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
 #[cfg(feature = "viewer")]
 fn configure_developer_console(
   viewer: &simhark::viewer::ViewerServer,
+  dev: bool,
   blue: Option<&dyn controller::Controller>,
   yellow: Option<&dyn controller::Controller>,
+  teleport_ball_on_no_progress: bool,
 ) {
-  let targets = [
-    ("blue", "Blue", blue),
-    ("yellow", "Yellow", yellow),
-  ]
-  .into_iter()
-  .filter_map(|(id, label, controller)| {
-    controller
-      .and_then(controller::Controller::developer_schema)
-      .map(|schema| (id, label, schema))
-  })
-  .collect::<Vec<_>>();
+  if dev {
+    let ais = hot_swappable_team_kinds()
+      .into_iter()
+      .map(|id| {
+        serde_json::json!({
+          "id": id,
+          "label": id,
+        })
+      })
+      .collect::<Vec<_>>();
+    viewer.set_developer_schema(serde_json::json!({
+      "id": "match-runner-dev",
+      "title": "Match development",
+      "description": "Replace either in-process AI while preserving the live world.",
+      "matchControls": {
+        "availableAis": ais,
+        "blueAi": blue.map(controller::Controller::name),
+        "yellowAi": yellow.map(controller::Controller::name),
+        "blueDeveloperSchema": blue.and_then(controller::Controller::developer_schema),
+        "yellowDeveloperSchema": yellow.and_then(controller::Controller::developer_schema),
+        "teleportBallOnNoProgress": teleport_ball_on_no_progress,
+      },
+      "modes": [
+        { "id": "blue", "label": "Blue team" },
+        { "id": "yellow", "label": "Yellow team" },
+      ],
+      "tabs": [{
+        "id": "match",
+        "label": "Match",
+        "icon": "schema",
+        "source": {
+          "kind": "inline",
+          "part": {
+            "kind": "empty",
+            "id": "match-controls",
+            "title": "Match controls",
+          },
+        },
+      }],
+      "initialTabId": "match",
+    }));
+    return;
+  }
+
+  let targets = [("blue", "Blue", blue), ("yellow", "Yellow", yellow)]
+    .into_iter()
+    .filter_map(|(id, label, controller)| {
+      controller
+        .and_then(controller::Controller::developer_schema)
+        .map(|schema| (id, label, schema))
+    })
+    .collect::<Vec<_>>();
   let Some((initial_id, _, mut schema)) = targets.first().cloned() else {
     return;
   };
@@ -362,22 +488,45 @@ fn configure_developer_console(
 #[cfg(feature = "viewer")]
 fn apply_developer_requests(
   viewer: &simhark::viewer::ViewerServer,
+  dev: bool,
   blue: &mut Option<Box<dyn controller::Controller>>,
   yellow: &mut Option<Box<dyn controller::Controller>>,
+  bots: TeamBotCounts,
+  director: &mut MatchDirector,
 ) {
-  for request in viewer.take_developer_requests() {
+  let requests = viewer.take_developer_requests();
+  let controls_changed = !requests.is_empty();
+  for request in requests {
     let target = request.target().to_string();
-    let controller = match target.as_str() {
-      "blue" => blue.as_deref_mut(),
-      "yellow" => yellow.as_deref_mut(),
-      _ => None,
+    let result = match &request {
+      simhark::viewer::DeveloperRequest::SwitchAi { ai, .. } if dev => {
+        swap_controller(ai, &target, blue, yellow, bots)
+      }
+      simhark::viewer::DeveloperRequest::SetBallRecovery { enabled, .. } if dev => {
+        director.set_teleport_ball_on_no_progress(*enabled);
+        Ok(format!(
+          "Ball teleport on no progress {}",
+          if *enabled { "enabled" } else { "disabled" }
+        ))
+      }
+      simhark::viewer::DeveloperRequest::Activate { .. }
+      | simhark::viewer::DeveloperRequest::Disable { .. } => {
+        let controller = match target.as_str() {
+          "blue" => blue.as_deref_mut(),
+          "yellow" => yellow.as_deref_mut(),
+          _ => None,
+        };
+        controller
+          .ok_or_else(|| format!("no controller is available for target {target}"))
+          .and_then(|controller| controller.apply_developer_request(&request))
+      }
+      _ => Err("request is not available in this match mode".to_string()),
     };
-    let result = controller
-      .ok_or_else(|| format!("no controller is available for target {target}"))
-      .and_then(|controller| controller.apply_developer_request(&request));
     let entry = match &request {
       simhark::viewer::DeveloperRequest::Activate { entry, .. } => Some(entry.clone()),
+      simhark::viewer::DeveloperRequest::SwitchAi { ai, .. } => Some(ai.clone()),
       simhark::viewer::DeveloperRequest::Disable { .. } => None,
+      simhark::viewer::DeveloperRequest::SetBallRecovery { .. } => None,
     };
     viewer.set_developer_result(simhark::viewer::DeveloperResult {
       target,
@@ -386,6 +535,39 @@ fn apply_developer_requests(
       message: result.unwrap_or_else(|error| error),
     });
   }
+  if dev && controls_changed {
+    configure_developer_console(
+      viewer,
+      true,
+      blue.as_deref(),
+      yellow.as_deref(),
+      director.teleport_ball_on_no_progress(),
+    );
+  }
+}
+
+#[cfg(feature = "viewer")]
+fn swap_controller(
+  ai: &str,
+  target: &str,
+  blue: &mut Option<Box<dyn controller::Controller>>,
+  yellow: &mut Option<Box<dyn controller::Controller>>,
+  bots: TeamBotCounts,
+) -> Result<String, String> {
+  if !hot_swappable_team_kinds().contains(&ai) {
+    return Err(format!("{ai:?} is not an available in-process AI"));
+  }
+  let kind = TeamKind::parse(ai)?;
+  let (slot, color, count) = match target {
+    "blue" => (blue, TeamColor::Blue, bots.blue),
+    "yellow" => (yellow, TeamColor::Yellow, bots.yellow),
+    _ => return Err(format!("unknown team target: {target}")),
+  };
+  if count == 0 {
+    return Err(format!("{target} has no active AI robots"));
+  }
+  *slot = Some(build_controller(&kind, color, count as u8));
+  Ok(format!("{target} is now controlled by {ai}"))
 }
 
 pub(crate) fn write_replay(path: &str, replay: ReplayLog) {

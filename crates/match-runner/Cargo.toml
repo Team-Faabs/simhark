@@ -31,6 +31,16 @@ dehumanized = { path = "../../../dehumanized", optional = true }
 
 [features]
 default = ["bangka", "bongka", "ungabunga", "sim-time"]
+all = [
+  "bangka",
+  "bongka",
+  "ungabunga",
+  "dehumanized",
+  "viewer-debug",
+  "sim-time",
+  "sumatra",
+  "validator",
+]
 faabs = ["dep:simhark_faabs"]
 bangka = ["faabs", "dep:bangka"]
 bongka = ["faabs", "dep:bongka"]

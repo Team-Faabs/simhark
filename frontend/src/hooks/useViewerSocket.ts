@@ -165,8 +165,19 @@ export interface DeveloperResult {
 }
 
 export interface DeveloperSnapshot {
-  schema: import("@dehumanized/schema-renderer").RendererSchema;
+  schema: import("@dehumanized/schema-renderer").RendererSchema & {
+    matchControls?: MatchDeveloperControls;
+  };
   results: Record<string, DeveloperResult>;
+}
+
+export interface MatchDeveloperControls {
+  availableAis: Array<{ id: string; label: string }>;
+  blueAi: string | null;
+  yellowAi: string | null;
+  blueDeveloperSchema: import("@dehumanized/schema-renderer").RendererSchema | null;
+  yellowDeveloperSchema: import("@dehumanized/schema-renderer").RendererSchema | null;
+  teleportBallOnNoProgress: boolean;
 }
 
 export type DeveloperRequest =
@@ -181,6 +192,16 @@ export type DeveloperRequest =
   | {
       action: "disable";
       target: string;
+    }
+  | {
+      action: "switch_ai";
+      target: "blue" | "yellow";
+      ai: string;
+    }
+  | {
+      action: "set_ball_recovery";
+      target: "ball-recovery";
+      enabled: boolean;
     };
 
 export interface ViewerFrame {

@@ -68,6 +68,16 @@ fn parse() -> Result<Args, String> {
       "--validate-pickup" => mc.validate_pickup = true,
       "--viewer" => mc.viewer = true,
       "--realtime" => mc.realtime = true,
+      "--dev" => {
+        #[cfg(not(feature = "viewer"))]
+        return Err("--dev requires building match-runner with `--features viewer`".to_string());
+        #[cfg(feature = "viewer")]
+        {
+          mc.dev = true;
+          mc.viewer = true;
+          mc.realtime = true;
+        }
+      }
       "--quiet" => mc.quiet = true,
       "-h" | "--help" => {
         print_help();
@@ -78,6 +88,15 @@ fn parse() -> Result<Args, String> {
   }
   log_base = log;
   mc.log = log_base;
+  if mc.dev && mc.replay.is_some() {
+    return Err("--dev cannot be combined with --replay".to_string());
+  }
+  if mc.dev && matches != 1 {
+    return Err("--dev cannot be combined with --matches".to_string());
+  }
+  if mc.dev && (mc.blue.is_external() || mc.yellow.is_external()) {
+    return Err("--dev supports in-process AIs only; Sumatra cannot be hot-swapped".to_string());
+  }
   if mc.replay.as_deref() == Some(DEFAULT_REPLAY_PATH) {
     mc.replay = Some(default_replay_path(&mc));
   }
@@ -134,6 +153,7 @@ Options:\n\
   --validate-pickup warn if close slow pickup or fast predicted pickup is neglected\n\
   --viewer          open the live web viewer (build with --features viewer)\n\
   --realtime        pace the sim to ~60Hz wall-clock\n\
+  --dev             unlimited live match with AI hot-swap and ball-recovery controls\n\
   --quiet           less stdout\n\
 \n\
 Team kinds: bangka | bongka[:params.json] | ungabunga[:params.json] | crashpilot[:model.safetensors] | dummy | sumatra (real, external JVM)\n\
@@ -141,6 +161,7 @@ Team kinds: bangka | bongka[:params.json] | ungabunga[:params.json] | crashpilot
 'crashpilot' defaults to /run/media/shark/data/dev/robocup/ai/crashpilot.safetensors.\n\
 'dummy' keeps that team's robots idle with zero wheel velocity.\n\
 'sumatra' launches the real Sumatra over SimNet and runs in real time. Use\n\
+--dev supports in-process AIs only; Sumatra is not a hot-swap target.\n\
 --div b: the in-process AI (CrashPilot) supports at most 8 robots/team."
   );
 }

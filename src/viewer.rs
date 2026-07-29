@@ -98,12 +98,23 @@ pub enum DeveloperRequest {
   Disable {
     target: String,
   },
+  SwitchAi {
+    target: String,
+    ai: String,
+  },
+  SetBallRecovery {
+    target: String,
+    enabled: bool,
+  },
 }
 
 impl DeveloperRequest {
   pub fn target(&self) -> &str {
     match self {
-      Self::Activate { target, .. } | Self::Disable { target } => target,
+      Self::Activate { target, .. }
+      | Self::Disable { target }
+      | Self::SwitchAi { target, .. }
+      | Self::SetBallRecovery { target, .. } => target,
     }
   }
 }
@@ -638,10 +649,12 @@ impl ViewerServer {
     let Ok(schema) = serde_json::to_value(schema) else {
       return;
     };
-    *self.developer.lock() = Some(DeveloperSnapshot {
-      schema,
-      results: HashMap::new(),
-    });
+    let mut developer = self.developer.lock();
+    let results = developer
+      .take()
+      .map(|snapshot| snapshot.results)
+      .unwrap_or_default();
+    *developer = Some(DeveloperSnapshot { schema, results });
   }
 
   /// Drain the most recent request for each target. Repeated form edits are
@@ -1564,6 +1577,31 @@ mod tests {
         entry,
         ..
       } if target == "blue" && kind == "skill" && entry == "Pass To"
+    ));
+  }
+
+  #[test]
+  fn parses_match_developer_requests() {
+    let switch = serde_json::from_str::<DeveloperRequest>(
+      r#"{"action":"switch_ai","target":"yellow","ai":"bongka"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      switch,
+      DeveloperRequest::SwitchAi { target, ai }
+        if target == "yellow" && ai == "bongka"
+    ));
+
+    let recovery = serde_json::from_str::<DeveloperRequest>(
+      r#"{"action":"set_ball_recovery","target":"ball-recovery","enabled":false}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      recovery,
+      DeveloperRequest::SetBallRecovery {
+        target,
+        enabled: false,
+      } if target == "ball-recovery"
     ));
   }
 }

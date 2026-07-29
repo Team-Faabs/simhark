@@ -84,6 +84,13 @@ impl Evaluator {
     }
   }
 
+  pub fn set_team_name(&mut self, color: TeamColor, name: String) {
+    match color {
+      TeamColor::Blue => self.blue_name = name,
+      TeamColor::Yellow => self.yellow_name = name,
+    }
+  }
+
   pub fn tick(&mut self, state: &WorldState, prev: Option<&WorldState>) {
     self.total_ticks += 1;
     let half_l = self.cfg.field.field_length * 0.5;

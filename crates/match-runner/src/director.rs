@@ -41,6 +41,7 @@ pub struct MatchDirector {
   /// The scorer of a goal detected this tick (consumed via `take_goal`).
   last_goal: Option<TeamColor>,
   duration: f64,
+  teleport_ball_on_no_progress: bool,
   prepare_time: f64,
   blue_bots: usize,
   yellow_bots: usize,
@@ -63,6 +64,7 @@ impl MatchDirector {
       last_event: None,
       last_goal: None,
       duration: duration_secs,
+      teleport_ball_on_no_progress: true,
       prepare_time: 0.8,
       blue_bots: robots_per_team,
       yellow_bots: robots_per_team,
@@ -77,6 +79,18 @@ impl MatchDirector {
 
   pub fn is_over(&self, state: &WorldState) -> bool {
     state.sim_time >= self.duration
+  }
+
+  pub fn teleport_ball_on_no_progress(&self) -> bool {
+    self.teleport_ball_on_no_progress
+  }
+
+  pub fn set_teleport_ball_on_no_progress(&mut self, enabled: bool) {
+    self.teleport_ball_on_no_progress = enabled;
+    if !enabled {
+      self.stuck_frames = 0;
+      self.idle_frames = 0;
+    }
   }
 
   /// The game command for a given team color this tick.
@@ -155,7 +169,7 @@ impl MatchDirector {
     //      (a) never fires because a robot is right on it. Without (b) a
     //      single corner-wedge stalls the whole match (observed: ball frozen
     //      out of bounds for the entire remainder of play).
-    if matches!(self.phase, Phase::Running) {
+    if matches!(self.phase, Phase::Running) && self.teleport_ball_on_no_progress {
       // (a) unreachable
       if self.ball_stuck(state) {
         self.stuck_frames += 1;
@@ -280,6 +294,48 @@ fn jitter(seed: u64, id: usize, axis: u64) -> f64 {
   z ^= z >> 31;
   // Map to [-1, 1).
   (z as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn idle_state() -> WorldState {
+    WorldState {
+      world_id: 0,
+      sim_time: 2.0,
+      frame: 120,
+      ball: simhark::BallState {
+        x: 0.5,
+        y: 0.0,
+        z: 0.0,
+        vx: 0.0,
+        vy: 0.0,
+        vz: 0.0,
+      },
+      blue_robots: Vec::new(),
+      yellow_robots: Vec::new(),
+      goal_blue: false,
+      goal_yellow: false,
+    }
+  }
+
+  #[test]
+  fn no_progress_recovery_can_be_toggled_at_runtime() {
+    let mut director = MatchDirector::new(WorldConfig::division_b(), 60.0);
+    director.phase = Phase::Running;
+    director.set_teleport_ball_on_no_progress(false);
+
+    for _ in 0..300 {
+      assert!(director.update(&idle_state()).teleport_ball.is_none());
+    }
+
+    director.set_teleport_ball_on_no_progress(true);
+    assert!(
+      (0..100).any(|_| director.update(&idle_state()).teleport_ball.is_some()),
+      "re-enabling recovery should restore the existing stuck-ball behaviour"
+    );
+  }
 }
 
 /// A simple defensive formation for `color` on its own half. Positions are

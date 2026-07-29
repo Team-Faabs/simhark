@@ -22,6 +22,7 @@ declare global {
 const FALLBACK_WS_PORT = 8316;
 type ViewerRoute = "default" | "debug" | "debug-big" | "dev";
 type DebugTeamFilter = "Blue" | "Yellow" | null;
+export type ViewerWorkspace = "regular" | "dev-match" | "ai-lab";
 
 function resolveWsPort(): number {
   if (typeof window !== "undefined" && typeof window.__SIMHARK_WS_PORT__ === "number") {
@@ -79,7 +80,9 @@ export default function App() {
     sendDeveloperRequest,
   } =
     useViewerSocket(wsPort);
-  const [developerMode, setDeveloperMode] = useState(route === "dev");
+  const [workspace, setWorkspace] = useState<ViewerWorkspace>(
+    route === "dev" ? "dev-match" : "regular"
+  );
   const control = frame?.control ?? { web_enabled: false, running: true, speed: 1 };
   const selectedWorlds = frame?.selected_worlds ?? [frame?.selected_world ?? 0];
   const teamNames = replayTeamNames(frame?.events ?? [], frame?.replay?.frame_index ?? 0);
@@ -186,49 +189,15 @@ export default function App() {
     stepReplay,
   ]);
 
-  const toggleDeveloperMode = useCallback(() => {
-    setDeveloperMode((enabled) => {
-      if (enabled) {
-        for (const mode of frame?.developer?.schema.modes ?? []) {
-          sendDeveloperRequest({ action: "disable", target: mode.id });
-        }
+  const selectWorkspace = useCallback((next: ViewerWorkspace) => {
+    if (workspace === "ai-lab" && next !== "ai-lab") {
+      for (const mode of frame?.developer?.schema.modes ?? []) {
+        sendDeveloperRequest({ action: "disable", target: mode.id });
       }
-      return !enabled;
-    });
-  }, [frame?.developer?.schema.modes, sendDeveloperRequest]);
-
-  if (developerMode && frame?.developer) {
-    return (
-      <AppShell
-        connected={connected}
-        gameState={gameState}
-        goals={frame.goals ?? defaultGoals}
-        developerAvailable
-        developerMode
-        onToggleDeveloper={toggleDeveloperMode}
-      >
-        <div className="developer-layout">
-          <div className="min-w-0 glass-panel overflow-hidden panel-accent">
-            <FieldCanvas
-              frame={frame}
-              debugTeamFilter={debugTeam}
-              showDebugOverlays={showDebug}
-              onSeekReplay={seekReplay}
-              onScrubReplay={scrubReplay}
-              onScrubReplayEnd={flushReplayScrub}
-              onMoveRobot={moveRobot}
-              onMoveBall={moveBall}
-            />
-          </div>
-          <DeveloperConsole
-            developer={frame.developer}
-            frame={frame}
-            onRequest={sendDeveloperRequest}
-          />
-        </div>
-      </AppShell>
-    );
-  }
+    }
+    setWorkspace(next);
+  }, [frame?.developer?.schema.modes, sendDeveloperRequest, workspace]);
+  const activeWorkspace = frame?.developer ? workspace : "regular";
 
   if (route === "debug-big") {
     return (
@@ -236,9 +205,6 @@ export default function App() {
         connected={connected}
         gameState={gameState}
         goals={frame?.goals ?? defaultGoals}
-        developerAvailable={Boolean(frame?.developer)}
-        developerMode={developerMode}
-        onToggleDeveloper={toggleDeveloperMode}
       >
         <div className="flex-1 grid min-h-0 gap-2 p-2 grid-cols-[minmax(0,1fr)_minmax(420px,0.95fr)]">
           <div className="min-w-0 glass-panel overflow-hidden panel-accent">
@@ -254,30 +220,49 @@ export default function App() {
             />
           </div>
           <div className="min-w-0 glass-panel panel-accent overflow-hidden flex flex-col">
-            <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
-            <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
-            <ReplayPanel
-              replay={frame?.replay ?? null}
-              events={frame?.events ?? []}
-              onSeek={seekReplay}
-              onScrub={scrubReplay}
-              onScrubEnd={flushReplayScrub}
-              onSkipSeconds={skipReplaySeconds}
-            />
-            <div className="shrink-0 grid grid-cols-2 border-b border-slate-700/30">
-              <GameStatePanel
-                gameState={gameState}
-                goals={frame?.goals ?? { blue: 0, yellow: 0, blue_active: false, yellow_active: false }}
+            {frame?.developer && (
+              <SidebarWorkspaceTabs
+                workspace={activeWorkspace}
+                onChange={selectWorkspace}
               />
-              <StatsPanel frame={frame} />
-            </div>
-            <div className="flex-1 min-h-0">
-              <DebugPanel
-                debug={frame?.debug ?? null}
-                teamFilter={debugTeam}
-                variant="big"
-              />
-            </div>
+            )}
+            {activeWorkspace === "regular" ? (
+              <>
+                <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+                <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
+                <ReplayPanel
+                  replay={frame?.replay ?? null}
+                  events={frame?.events ?? []}
+                  onSeek={seekReplay}
+                  onScrub={scrubReplay}
+                  onScrubEnd={flushReplayScrub}
+                  onSkipSeconds={skipReplaySeconds}
+                />
+                <div className="shrink-0 grid grid-cols-2 border-b border-slate-700/30">
+                  <GameStatePanel
+                    gameState={gameState}
+                    goals={frame?.goals ?? { blue: 0, yellow: 0, blue_active: false, yellow_active: false }}
+                  />
+                  <StatsPanel frame={frame} />
+                </div>
+                <div className="flex-1 min-h-0">
+                  <DebugPanel
+                    debug={frame?.debug ?? null}
+                    teamFilter={debugTeam}
+                    variant="big"
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="sidebar-workspace-content">
+                <DeveloperConsole
+                  developer={frame!.developer!}
+                  frame={frame}
+                  onRequest={sendDeveloperRequest}
+                  view={activeWorkspace}
+                />
+              </div>
+            )}
           </div>
         </div>
       </AppShell>
@@ -289,9 +274,6 @@ export default function App() {
       connected={connected}
       gameState={gameState}
       goals={frame?.goals ?? defaultGoals}
-      developerAvailable={Boolean(frame?.developer)}
-      developerMode={developerMode}
-      onToggleDeveloper={toggleDeveloperMode}
     >
       <div className="flex-1 flex min-h-0 gap-2 p-2">
         <div className="flex-1 min-w-0">
@@ -310,35 +292,54 @@ export default function App() {
         </div>
 
         <div className="w-88 shrink-0 glass-panel panel-accent flex flex-col overflow-y-auto overflow-x-hidden">
-          <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
-          <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
-          <ReplayPanel
-            replay={frame?.replay ?? null}
-            events={frame?.events ?? []}
-            onSeek={seekReplay}
-            onScrub={scrubReplay}
-            onScrubEnd={flushReplayScrub}
-            onSkipSeconds={skipReplaySeconds}
-          />
-          <WorldSelector
-            worldCount={frame?.world_count ?? 0}
-            selected={selectedWorlds}
-            suite={frame?.test_suite ?? null}
-            onSelect={selectWorlds}
-          />
-          <TestPanel
-            suite={frame?.test_suite ?? null}
-            selectedWorld={frame?.selected_world ?? 0}
-            onSelect={selectWorld}
-          />
-          <GameStatePanel
-            gameState={gameState}
-            goals={frame?.goals ?? { blue: 0, yellow: 0, blue_active: false, yellow_active: false }}
-          />
-          {showDebug && (
-            <DebugPanel debug={frame?.debug ?? null} teamFilter={debugTeam} />
+          {frame?.developer && (
+            <SidebarWorkspaceTabs
+              workspace={activeWorkspace}
+              onChange={selectWorkspace}
+            />
           )}
-          <StatsPanel frame={frame} />
+          {activeWorkspace === "regular" ? (
+            <>
+              <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+              <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
+              <ReplayPanel
+                replay={frame?.replay ?? null}
+                events={frame?.events ?? []}
+                onSeek={seekReplay}
+                onScrub={scrubReplay}
+                onScrubEnd={flushReplayScrub}
+                onSkipSeconds={skipReplaySeconds}
+              />
+              <WorldSelector
+                worldCount={frame?.world_count ?? 0}
+                selected={selectedWorlds}
+                suite={frame?.test_suite ?? null}
+                onSelect={selectWorlds}
+              />
+              <TestPanel
+                suite={frame?.test_suite ?? null}
+                selectedWorld={frame?.selected_world ?? 0}
+                onSelect={selectWorld}
+              />
+              <GameStatePanel
+                gameState={gameState}
+                goals={frame?.goals ?? { blue: 0, yellow: 0, blue_active: false, yellow_active: false }}
+              />
+              {showDebug && (
+                <DebugPanel debug={frame?.debug ?? null} teamFilter={debugTeam} />
+              )}
+              <StatsPanel frame={frame} />
+            </>
+          ) : (
+            <div className="sidebar-workspace-content">
+              <DeveloperConsole
+                developer={frame!.developer!}
+                frame={frame}
+                onRequest={sendDeveloperRequest}
+                view={activeWorkspace}
+              />
+            </div>
+          )}
         </div>
       </div>
     </AppShell>
@@ -378,22 +379,45 @@ function replayDetailValue(details: string, key: string): string | null {
   return value || null;
 }
 
+function SidebarWorkspaceTabs({
+  workspace,
+  onChange,
+}: {
+  workspace: ViewerWorkspace;
+  onChange: (workspace: ViewerWorkspace) => void;
+}) {
+  return (
+    <div className="sidebar-workspace-tabs" role="tablist" aria-label="Sidebar view">
+      {([
+        ["regular", "Game"],
+        ["dev-match", "Dev Match"],
+        ["ai-lab", "AI Lab"],
+      ] as const).map(([id, label]) => (
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspace === id}
+          className={workspace === id ? "sidebar-workspace-tab-active" : ""}
+          onClick={() => onChange(id)}
+          key={id}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function AppShell({
   connected,
   gameState,
   goals,
   children,
-  developerAvailable = false,
-  developerMode = false,
-  onToggleDeveloper,
 }: {
   connected: boolean;
   gameState: GameStateInfo | null;
   goals: GoalSummary;
   children: ReactNode;
-  developerAvailable?: boolean;
-  developerMode?: boolean;
-  onToggleDeveloper?: () => void;
 }) {
   return (
     <div className="h-full flex flex-col bg-dot-pattern text-slate-100">
@@ -429,19 +453,6 @@ function AppShell({
         <HeaderScoreboard gameState={gameState} goals={goals} />
 
         <div className="ml-auto flex items-center gap-2">
-          {developerAvailable && (
-            <button
-              type="button"
-              className={[
-                "developer-mode-toggle",
-                developerMode ? "developer-mode-toggle-active" : "",
-              ].join(" ")}
-              aria-pressed={developerMode}
-              onClick={onToggleDeveloper}
-            >
-              <span>{developerMode ? "AI LAB" : "DEV"}</span>
-            </button>
-          )}
           <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/30">
           <span
             className={`inline-block w-2 h-2 rounded-full transition-all duration-300 ${

@@ -9,11 +9,11 @@ use core_dump::types::ai_types::{
   self as ai, Ai, Commands, GameStage, Kicker, RobotCommand as AiRobotCommand,
 };
 use core_dump::vec::types::Vec2;
+use dehumanized::Dehumanized;
 use dehumanized::mut_command::MutCommands;
 use dehumanized::mut_state::MutGameState;
 use dehumanized::skill::SkillFactory;
 use dehumanized::skills::registry::{PLAYS, SKILLS};
-use dehumanized::Dehumanized;
 use serde_json::Value;
 use simhark::{
   MoveCommand, RobotCommand as SimRobotCommand, RobotState as SimRobotState, TeamColor,
@@ -156,6 +156,7 @@ impl Controller for DirectDehumanizedController {
         self.last_invocation_error = None;
         Ok(format!("{entry} is driving directly"))
       }
+      _ => Err("this request is handled by the match runner".to_string()),
     }
   }
 
