@@ -33,6 +33,17 @@ pub enum GameCommand {
 
 pub trait Controller {
   fn name(&self) -> &str;
+  #[cfg(feature = "viewer")]
+  fn developer_schema(&self) -> Option<serde_json::Value> {
+    None
+  }
+  #[cfg(feature = "viewer")]
+  fn apply_developer_request(
+    &mut self,
+    _request: &simhark::viewer::DeveloperRequest,
+  ) -> Result<String, String> {
+    Err("this controller does not expose developer actions".to_string())
+  }
   #[cfg(feature = "viewer-debug")]
   fn debug_snapshot(&self) -> Option<simhark::viewer::ViewerDebugSnapshot> {
     None

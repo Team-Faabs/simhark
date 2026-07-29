@@ -157,6 +157,32 @@ export interface ViewerDebugSnapshot {
   overlays?: DebugOverlay[];
 }
 
+export interface DeveloperResult {
+  target: string;
+  entry: string | null;
+  ok: boolean;
+  message: string;
+}
+
+export interface DeveloperSnapshot {
+  schema: import("@dehumanized/schema-renderer").RendererSchema;
+  results: Record<string, DeveloperResult>;
+}
+
+export type DeveloperRequest =
+  | {
+      action: "activate";
+      target: string;
+      kind: string;
+      entry: string;
+      config: import("@dehumanized/schema-renderer").JsonObject;
+      params: import("@dehumanized/schema-renderer").JsonObject;
+    }
+  | {
+      action: "disable";
+      target: string;
+    };
+
 export interface ViewerFrame {
   world_count: number;
   selected_world: number;
@@ -175,6 +201,7 @@ export interface ViewerFrame {
   events: ReplayEvent[];
   robot_inputs: RobotInputInfo[];
   debug?: ViewerDebugSnapshot | null;
+  developer?: DeveloperSnapshot | null;
 }
 
 const RECONNECT_DELAY_MS = 1000;
@@ -295,6 +322,20 @@ export function useViewerSocket(wsPort: number) {
     []
   );
 
+  const moveBall = useCallback((worldId: number, x: number, y: number) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(`ball:move:${worldId}:${x}:${y}`);
+    }
+  }, []);
+
+  const sendDeveloperRequest = useCallback((request: DeveloperRequest) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(`developer:${JSON.stringify(request)}`);
+    }
+  }, []);
+
   const stepReplay = useCallback((delta: number) => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -347,6 +388,8 @@ export function useViewerSocket(wsPort: number) {
     sendControl,
     setSpeed,
     moveRobot,
+    moveBall,
+    sendDeveloperRequest,
     stepReplay,
     skipReplay,
     seekReplay,

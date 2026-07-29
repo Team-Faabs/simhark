@@ -179,6 +179,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
+        configure_developer_console(&v, blue_ctrl.as_deref(), yellow_ctrl.as_deref());
         println!("viewer: {}", vc.http_url());
         Some(v)
       }
@@ -207,10 +208,11 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
-    if let Some(v) = &viewer
-      && v.apply_robot_move_requests(&mut engine) > 0
-    {
-      state = engine.world(0).get_state();
+    if let Some(v) = &viewer {
+      apply_developer_requests(v, &mut blue_ctrl, &mut yellow_ctrl);
+      if v.apply_robot_move_requests(&mut engine) > 0 {
+        state = engine.world(0).get_state();
+      }
     }
 
     let gc_blue = director.command_for(TeamColor::Blue);
@@ -317,6 +319,73 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     write_replay(path, replay.finish());
   }
   evaluator.finish(state.sim_time)
+}
+
+#[cfg(feature = "viewer")]
+fn configure_developer_console(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: Option<&dyn controller::Controller>,
+  yellow: Option<&dyn controller::Controller>,
+) {
+  let targets = [
+    ("blue", "Blue", blue),
+    ("yellow", "Yellow", yellow),
+  ]
+  .into_iter()
+  .filter_map(|(id, label, controller)| {
+    controller
+      .and_then(controller::Controller::developer_schema)
+      .map(|schema| (id, label, schema))
+  })
+  .collect::<Vec<_>>();
+  let Some((initial_id, _, mut schema)) = targets.first().cloned() else {
+    return;
+  };
+
+  schema["modes"] = serde_json::Value::Array(
+    targets
+      .iter()
+      .map(|(id, label, _)| {
+        serde_json::json!({
+          "id": id,
+          "label": format!("{label} team"),
+          "description": format!("Invoke against the {label} Dehumanized controller"),
+          "icon": "pulse",
+        })
+      })
+      .collect(),
+  );
+  schema["initialModeId"] = serde_json::Value::String(initial_id.to_string());
+  viewer.set_developer_schema(schema);
+}
+
+#[cfg(feature = "viewer")]
+fn apply_developer_requests(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: &mut Option<Box<dyn controller::Controller>>,
+  yellow: &mut Option<Box<dyn controller::Controller>>,
+) {
+  for request in viewer.take_developer_requests() {
+    let target = request.target().to_string();
+    let controller = match target.as_str() {
+      "blue" => blue.as_deref_mut(),
+      "yellow" => yellow.as_deref_mut(),
+      _ => None,
+    };
+    let result = controller
+      .ok_or_else(|| format!("no controller is available for target {target}"))
+      .and_then(|controller| controller.apply_developer_request(&request));
+    let entry = match &request {
+      simhark::viewer::DeveloperRequest::Activate { entry, .. } => Some(entry.clone()),
+      simhark::viewer::DeveloperRequest::Disable { .. } => None,
+    };
+    viewer.set_developer_result(simhark::viewer::DeveloperResult {
+      target,
+      entry,
+      ok: result.is_ok(),
+      message: result.unwrap_or_else(|error| error),
+    });
+  }
 }
 
 pub(crate) fn write_replay(path: &str, replay: ReplayLog) {

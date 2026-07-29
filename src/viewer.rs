@@ -9,12 +9,12 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tungstenite::{Message, accept};
 
-use crate::command::TeleportRobot;
+use crate::command::{TeleportBall, TeleportRobot};
 use crate::config::{FieldConfig, WorldConfig};
 use crate::engine::SimulationEngine;
 #[cfg(feature = "viewer-debug")]
@@ -66,6 +66,46 @@ pub struct GameStateInfo {
   pub stage: Option<String>,
   pub blue_name: Option<String>,
   pub yellow_name: Option<String>,
+}
+
+/// Schema-driven developer console published alongside the live viewer frame.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeveloperSnapshot {
+  pub schema: Value,
+  pub results: HashMap<String, DeveloperResult>,
+}
+
+/// Latest direct-invocation result for one developer target.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeveloperResult {
+  pub target: String,
+  pub entry: Option<String>,
+  pub ok: bool,
+  pub message: String,
+}
+
+/// A schema-renderer action sent from the frontend to the simulation binding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DeveloperRequest {
+  Activate {
+    target: String,
+    kind: String,
+    entry: String,
+    config: Value,
+    params: Value,
+  },
+  Disable {
+    target: String,
+  },
+}
+
+impl DeveloperRequest {
+  pub fn target(&self) -> &str {
+    match self {
+      Self::Activate { target, .. } | Self::Disable { target } => target,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +229,14 @@ pub struct RobotMoveRequest {
 
 type RobotMoveKey = (usize, TeamColor, usize);
 
+/// A ball reposition requested by dragging it in the browser viewer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BallMoveRequest {
+  pub world_id: usize,
+  pub x: f64,
+  pub y: f64,
+}
+
 #[derive(Serialize)]
 struct ControlSnapshot {
   web_enabled: bool,
@@ -260,11 +308,14 @@ pub struct ViewerServer {
   latest_frame: Arc<Mutex<Option<String>>>,
   game_state: Arc<Mutex<GameStateTracker>>,
   test_suite: Arc<Mutex<Option<Value>>>,
+  developer: Arc<Mutex<Option<DeveloperSnapshot>>>,
+  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
   goal_tracker: Arc<Mutex<GoalTracker>>,
   #[cfg(feature = "viewer-debug")]
   debug: Arc<Mutex<HashMap<usize, ViewerDebugSnapshot>>>,
   control: Arc<WebControlState>,
   robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
+  ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
   _http_thread: thread::JoinHandle<()>,
   _ws_thread: thread::JoinHandle<()>,
 }
@@ -282,6 +333,7 @@ struct ViewerFrame<'a> {
   states: Vec<&'a WorldState>,
   game_state: Option<PublishedGameState<'a>>,
   test_suite: Option<Value>,
+  developer: Option<DeveloperSnapshot>,
   goals: GoalSummary,
   control: ControlSnapshot,
   replay: ReplayStatus,
@@ -308,11 +360,14 @@ impl ViewerServer {
     let latest_frame = Arc::new(Mutex::new(None));
     let game_state = Arc::new(Mutex::new(GameStateTracker::default()));
     let test_suite = Arc::new(Mutex::new(None));
+    let developer = Arc::new(Mutex::new(None));
+    let developer_requests = Arc::new(Mutex::new(HashMap::new()));
     let goal_tracker = Arc::new(Mutex::new(GoalTracker::default()));
     #[cfg(feature = "viewer-debug")]
     let debug = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(WebControlState::default());
     let robot_move_requests = Arc::new(Mutex::new(HashMap::new()));
+    let ball_move_requests = Arc::new(Mutex::new(HashMap::new()));
     control.frame_seek_requested.store(-1, Ordering::Relaxed);
     // When web control is disabled the simulator is considered always
     // running, so callers that don't opt in see the legacy behaviour.
@@ -330,6 +385,8 @@ impl ViewerServer {
       let selected_worlds = Arc::clone(&selected_worlds);
       let control_for_ws = Arc::clone(&control);
       let robot_move_requests = Arc::clone(&robot_move_requests);
+      let ball_move_requests = Arc::clone(&ball_move_requests);
+      let developer_requests = Arc::clone(&developer_requests);
       thread::spawn(move || {
         run_websocket_server(
           ws_listener,
@@ -338,6 +395,8 @@ impl ViewerServer {
           selected_worlds,
           control_for_ws,
           robot_move_requests,
+          ball_move_requests,
+          developer_requests,
         )
       })
     };
@@ -354,11 +413,14 @@ impl ViewerServer {
       latest_frame,
       game_state,
       test_suite,
+      developer,
+      developer_requests,
       goal_tracker,
       #[cfg(feature = "viewer-debug")]
       debug,
       control,
       robot_move_requests,
+      ball_move_requests,
       _http_thread: http_thread,
       _ws_thread: ws_thread,
     })
@@ -426,13 +488,14 @@ impl ViewerServer {
     }
   }
 
-  /// Apply the latest browser drag request for each robot to its simulation
-  /// world. Returns the number of robots that were repositioned.
+  /// Apply the latest browser drag request for each robot and ball to its
+  /// simulation world. Returns the number of entities that were repositioned.
   ///
   /// Applications with a viewer should call this once per loop, including
   /// while paused, so dragging remains responsive without advancing physics.
   pub fn apply_robot_move_requests(&self, engine: &mut SimulationEngine) -> usize {
     let requests = std::mem::take(&mut *self.robot_move_requests.lock());
+    let ball_requests = std::mem::take(&mut *self.ball_move_requests.lock());
     let mut applied = 0;
     for request in requests.into_values() {
       let Some(world) = engine.worlds.get_mut(request.world_id) else {
@@ -464,6 +527,23 @@ impl ViewerServer {
       });
       applied += 1;
     }
+    for request in ball_requests.into_values() {
+      let Some(world) = engine.worlds.get_mut(request.world_id) else {
+        continue;
+      };
+      let ball_radius = world.config.ball.radius;
+      let x_limit = (world.config.field.field_length * 0.5 - ball_radius).max(0.0);
+      let y_limit = (world.config.field.field_width * 0.5 - ball_radius).max(0.0);
+      world.teleport_ball(&TeleportBall {
+        x: Some(request.x.clamp(-x_limit, x_limit)),
+        y: Some(request.y.clamp(-y_limit, y_limit)),
+        z: Some(0.0),
+        vx: Some(0.0),
+        vy: Some(0.0),
+        vz: Some(0.0),
+      });
+      applied += 1;
+    }
     applied
   }
 
@@ -492,6 +572,34 @@ impl ViewerServer {
 
   pub fn set_test_suite<T: Serialize>(&self, suite: T) {
     *self.test_suite.lock() = serde_json::to_value(suite).ok();
+  }
+
+  /// Enable the schema-driven developer console for this viewer.
+  pub fn set_developer_schema<T: Serialize>(&self, schema: T) {
+    let Ok(schema) = serde_json::to_value(schema) else {
+      return;
+    };
+    *self.developer.lock() = Some(DeveloperSnapshot {
+      schema,
+      results: HashMap::new(),
+    });
+  }
+
+  /// Drain the most recent request for each target. Repeated form edits are
+  /// coalesced so the simulation loop cannot be flooded by the browser.
+  pub fn take_developer_requests(&self) -> Vec<DeveloperRequest> {
+    self
+      .developer_requests
+      .lock()
+      .drain()
+      .map(|(_, request)| request)
+      .collect()
+  }
+
+  pub fn set_developer_result(&self, result: DeveloperResult) {
+    if let Some(developer) = self.developer.lock().as_mut() {
+      developer.results.insert(result.target.clone(), result);
+    }
   }
 
   #[cfg(feature = "viewer-debug")]
@@ -562,6 +670,7 @@ impl ViewerServer {
     };
     let game_state_guard = self.game_state.lock();
     let test_suite = self.test_suite.lock().clone();
+    let developer = self.developer.lock().clone();
     let mut goal_guard = self.goal_tracker.lock();
     goal_guard.observe(state);
     let selected_worlds = selected_worlds_snapshot(&self.selected_worlds, self.world_count);
@@ -593,6 +702,7 @@ impl ViewerServer {
       },
       game_state: game_state_guard.snapshot(),
       test_suite,
+      developer,
       goals: GoalSummary {
         blue: goal_guard.blue,
         yellow: goal_guard.yellow,
@@ -641,6 +751,7 @@ impl ViewerServer {
     goal_guard.observe(state);
     let game_state_guard = self.game_state.lock();
     let test_suite = self.test_suite.lock().clone();
+    let developer = self.developer.lock().clone();
     #[cfg(feature = "viewer-debug")]
     let debug = self
       .debug
@@ -671,6 +782,7 @@ impl ViewerServer {
       },
       game_state: game_state_guard.snapshot(),
       test_suite,
+      developer,
       goals: GoalSummary {
         blue: goal_guard.blue,
         yellow: goal_guard.yellow,
@@ -802,7 +914,8 @@ fn run_http_server(server: Server, ws_port: u16) {
       (&Method::Get, "/")
       | (&Method::Get, "/index.html")
       | (&Method::Get, "/debug")
-      | (&Method::Get, "/debug-big") => {
+      | (&Method::Get, "/debug-big")
+      | (&Method::Get, "/dev") => {
         let body = render_index(ws_port);
         let mut response = Response::from_string(body).with_status_code(StatusCode(200));
         if let Some(header) = html_type.clone() {
@@ -951,6 +1064,8 @@ fn run_websocket_server(
   selected_worlds: Arc<Mutex<Vec<usize>>>,
   control: Arc<WebControlState>,
   robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
+  ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
+  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
 ) {
   for stream in listener.incoming() {
     let Ok(stream) = stream else {
@@ -962,6 +1077,8 @@ fn run_websocket_server(
     let selected_worlds = Arc::clone(&selected_worlds);
     let control = Arc::clone(&control);
     let robot_move_requests = Arc::clone(&robot_move_requests);
+    let ball_move_requests = Arc::clone(&ball_move_requests);
+    let developer_requests = Arc::clone(&developer_requests);
     thread::spawn(move || {
       let Ok(mut websocket) = accept(stream) else {
         return;
@@ -982,6 +1099,8 @@ fn run_websocket_server(
               &selected_worlds,
               &control,
               &robot_move_requests,
+              &ball_move_requests,
+              &developer_requests,
             ),
             Ok(Message::Close(_)) => {
               close_requested = true;
@@ -1031,7 +1150,18 @@ fn handle_client_message(
   selected_worlds: &Mutex<Vec<usize>>,
   control: &WebControlState,
   robot_move_requests: &Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>,
+  ball_move_requests: &Mutex<HashMap<usize, BallMoveRequest>>,
+  developer_requests: &Mutex<HashMap<String, DeveloperRequest>>,
 ) {
+  if let Some(value) = message.strip_prefix("developer:") {
+    if let Ok(request) = serde_json::from_str::<DeveloperRequest>(value) {
+      developer_requests
+        .lock()
+        .insert(request.target().to_owned(), request);
+    }
+    return;
+  }
+
   if let Some(value) = message.strip_prefix("world:") {
     if let Ok(index) = value.trim().parse::<usize>() {
       selected_world.store(index, Ordering::Relaxed);
@@ -1128,6 +1258,11 @@ fn handle_client_message(
     robot_move_requests
       .lock()
       .insert((request.world_id, request.team, request.id), request);
+    return;
+  }
+
+  if let Some(request) = parse_ball_move_request(message) {
+    ball_move_requests.lock().insert(request.world_id, request);
   }
 }
 
@@ -1153,6 +1288,18 @@ fn parse_robot_move_request(message: &str) -> Option<RobotMoveRequest> {
     x,
     y,
   })
+}
+
+fn parse_ball_move_request(message: &str) -> Option<BallMoveRequest> {
+  let value = message.strip_prefix("ball:move:")?;
+  let mut parts = value.split(':');
+  let world_id = parts.next()?.parse().ok()?;
+  let x = parts.next()?.parse::<f64>().ok()?;
+  let y = parts.next()?.parse::<f64>().ok()?;
+  if parts.next().is_some() || !x.is_finite() || !y.is_finite() {
+    return None;
+  }
+  Some(BallMoveRequest { world_id, x, y })
 }
 
 fn parse_world_selection(value: &str) -> Vec<usize> {
@@ -1213,7 +1360,10 @@ fn render_index(ws_port: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::{RobotMoveRequest, parse_robot_move_request};
+  use super::{
+    BallMoveRequest, DeveloperRequest, RobotMoveRequest, parse_ball_move_request,
+    parse_robot_move_request,
+  };
   use crate::state::TeamColor;
 
   #[test]
@@ -1238,5 +1388,48 @@ mod tests {
       parse_robot_move_request("robot:move:0:Blue:1:0:0:extra"),
       None
     );
+  }
+
+  #[test]
+  fn parses_ball_move_request() {
+    assert_eq!(
+      parse_ball_move_request("ball:move:2:-3.25:1.5"),
+      Some(BallMoveRequest {
+        world_id: 2,
+        x: -3.25,
+        y: 1.5,
+      })
+    );
+  }
+
+  #[test]
+  fn rejects_invalid_ball_move_request() {
+    assert_eq!(parse_ball_move_request("ball:move:0:NaN:0"), None);
+    assert_eq!(parse_ball_move_request("ball:move:0:0:0:extra"), None);
+  }
+
+  #[test]
+  fn parses_developer_activation_request() {
+    let request = serde_json::from_str::<DeveloperRequest>(
+      r#"{
+        "action": "activate",
+        "target": "blue",
+        "kind": "skill",
+        "entry": "Pass To",
+        "config": {},
+        "params": {"passer": "R0", "receiver": "R1"}
+      }"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+      request,
+      DeveloperRequest::Activate {
+        target,
+        kind,
+        entry,
+        ..
+      } if target == "blue" && kind == "skill" && entry == "Pass To"
+    ));
   }
 }

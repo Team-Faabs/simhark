@@ -101,3 +101,109 @@ body,
 .animate-fade-in {
   animation: fade-in 0.3s ease-out;
 }
+
+.developer-layout {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  gap: 0.5rem;
+  padding: 0.5rem;
+}
+
+.developer-layout > :first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.developer-console {
+  width: 22rem;
+  min-width: 22rem;
+  min-height: 0;
+  flex: 0 0 22rem;
+  overflow: auto;
+}
+
+.developer-schema-renderer {
+  min-height: 100%;
+  border-radius: 12px;
+  --sr-bg: rgba(15, 23, 42, 0.96);
+  --sr-panel: rgba(30, 41, 59, 0.48);
+  --sr-panel-strong: rgba(30, 41, 59, 0.92);
+  --sr-line: rgba(71, 85, 105, 0.5);
+  --sr-line-strong: rgba(34, 211, 238, 0.28);
+  --sr-radius: 9px;
+}
+
+.developer-footer {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+}
+
+.developer-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.developer-status span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
+}
+
+.developer-status-error {
+  color: #fda4af;
+}
+
+.developer-status-error span {
+  background: #fb7185;
+  box-shadow: 0 0 8px rgba(251, 113, 133, 0.55);
+}
+
+.developer-stop,
+.developer-mode-toggle {
+  border: 1px solid rgba(71, 85, 105, 0.65);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.72);
+  color: #94a3b8;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  transition: 140ms ease;
+}
+
+.developer-stop {
+  padding: 7px 10px;
+}
+
+.developer-mode-toggle {
+  min-width: 48px;
+  padding: 7px 9px;
+}
+
+.developer-stop:hover,
+.developer-mode-toggle:hover,
+.developer-mode-toggle-active {
+  border-color: rgba(34, 211, 238, 0.4);
+  background: rgba(8, 145, 178, 0.13);
+  color: #67e8f9;
+}
+
+.developer-stop:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}

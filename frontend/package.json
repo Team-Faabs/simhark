@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dehumanized/schema-renderer": "file:../../dehumanized/packages/schema-renderer",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

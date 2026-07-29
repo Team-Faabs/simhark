@@ -9,11 +9,17 @@ use core_dump::types::ai_types::{
   self as ai, Ai, Commands, GameStage, Kicker, RobotCommand as AiRobotCommand,
 };
 use core_dump::vec::types::Vec2;
+use dehumanized::mut_command::MutCommands;
+use dehumanized::mut_state::MutGameState;
+use dehumanized::skill::SkillFactory;
+use dehumanized::skills::registry::{PLAYS, SKILLS};
 use dehumanized::Dehumanized;
+use serde_json::Value;
 use simhark::{
   MoveCommand, RobotCommand as SimRobotCommand, RobotState as SimRobotState, TeamColor,
   WorldConfig, WorldState,
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MM_PER_M: f64 = 1_000.0;
 const DEFAULT_SPEED_MM_S: f64 = 4_000.0;
@@ -27,6 +33,16 @@ const ESTIMATED_ROLL_DECEL_M_S2: f64 = 0.7;
 pub struct DirectDehumanizedController {
   ai: Dehumanized,
   num_robots: u8,
+  active_registry_entry: Option<ActiveRegistryEntry>,
+  last_invocation_error: Option<String>,
+}
+
+#[derive(Clone)]
+struct ActiveRegistryEntry {
+  name: String,
+  factory: &'static dyn SkillFactory,
+  config: Value,
+  params: Value,
 }
 
 impl DirectDehumanizedController {
@@ -34,6 +50,60 @@ impl DirectDehumanizedController {
     Self {
       ai: Dehumanized::with_robot_count(num_robots),
       num_robots,
+      active_registry_entry: None,
+      last_invocation_error: None,
+    }
+  }
+
+  fn invoke_registry_entry(&mut self, game_state: ai::GameState) -> Commands {
+    let Some(active) = self.active_registry_entry.clone() else {
+      return self.ai.predict(game_state);
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+      let mut initial = Commands::default();
+      for command in initial.iter_mut().take(self.num_robots as usize) {
+        *command = Some(AiRobotCommand::default());
+      }
+      let state = MutGameState::new(game_state);
+      let commands = MutCommands::new(initial);
+      let mut skill = active
+        .factory
+        .instantiate(active.config, active.params, &state, &commands)
+        .map_err(|error| error.to_string())?;
+      skill.step();
+      drop(skill);
+
+      let mut output = commands.commands();
+      for command in output.iter_mut().flatten() {
+        // Direct registry execution intentionally bypasses the normal AI and
+        // collision planner. The simhark binding below turns these targets
+        // straight into simulator drive velocities.
+        command.raw_movement = true;
+      }
+      Ok::<_, String>(output)
+    }));
+
+    match result {
+      Ok(Ok(commands)) => {
+        self.last_invocation_error = None;
+        commands
+      }
+      Ok(Err(error)) => {
+        self.report_invocation_error(&active.name, error);
+        Commands::default()
+      }
+      Err(_) => {
+        self.report_invocation_error(&active.name, "skill panicked".to_string());
+        Commands::default()
+      }
+    }
+  }
+
+  fn report_invocation_error(&mut self, entry: &str, error: String) {
+    let message = format!("{entry}: {error}");
+    if self.last_invocation_error.as_deref() != Some(message.as_str()) {
+      eprintln!("[dehumanized-dev] {message}");
+      self.last_invocation_error = Some(message);
     }
   }
 }
@@ -41,6 +111,52 @@ impl DirectDehumanizedController {
 impl Controller for DirectDehumanizedController {
   fn name(&self) -> &str {
     "dehumanized"
+  }
+
+  #[cfg(feature = "viewer")]
+  fn developer_schema(&self) -> Option<Value> {
+    Some(dehumanized::skills::registry::renderer_schema())
+  }
+
+  #[cfg(feature = "viewer")]
+  fn apply_developer_request(
+    &mut self,
+    request: &simhark::viewer::DeveloperRequest,
+  ) -> Result<String, String> {
+    match request {
+      simhark::viewer::DeveloperRequest::Disable { .. } => {
+        self.active_registry_entry = None;
+        self.last_invocation_error = None;
+        Ok("Match AI restored".to_string())
+      }
+      simhark::viewer::DeveloperRequest::Activate {
+        kind,
+        entry,
+        config,
+        params,
+        ..
+      } => {
+        let registry = match kind.as_str() {
+          "skill" | "skills" => SKILLS.0,
+          "play" | "plays" => PLAYS.0,
+          _ => return Err(format!("unknown registry kind: {kind}")),
+        };
+        let Some((_, factory)) = registry.iter().find(|(name, _)| *name == entry) else {
+          return Err(format!("{entry:?} is not registered in {kind}"));
+        };
+        factory
+          .validate(config, params)
+          .map_err(|error| format!("invalid {entry} values: {error}"))?;
+        self.active_registry_entry = Some(ActiveRegistryEntry {
+          name: entry.clone(),
+          factory: *factory,
+          config: config.clone(),
+          params: params.clone(),
+        });
+        self.last_invocation_error = None;
+        Ok(format!("{entry} is driving directly"))
+      }
+    }
   }
 
   fn act(
@@ -55,7 +171,7 @@ impl Controller for DirectDehumanizedController {
     }
 
     let game_state = world_state_to_dehumanized(state, color, gc);
-    let commands = self.ai.predict(game_state);
+    let commands = self.invoke_registry_entry(game_state);
     commands_to_sim(
       commands,
       state,
@@ -357,6 +473,38 @@ mod tests {
         vy: 0.0,
         angular: 0.0
       })
+    ));
+  }
+
+  #[cfg(feature = "viewer")]
+  #[test]
+  fn registry_request_invokes_pass_to_through_direct_drive() {
+    let mut controller = DirectDehumanizedController::new(1);
+    controller
+      .apply_developer_request(&simhark::viewer::DeveloperRequest::Activate {
+        target: "blue".to_string(),
+        kind: "skill".to_string(),
+        entry: "Pass To".to_string(),
+        config: serde_json::json!({}),
+        params: serde_json::json!({
+          "passer": "R0",
+          "receiver": "R0",
+        }),
+      })
+      .unwrap();
+
+    let output = controller.act(
+      &test_world(),
+      &WorldConfig::division_b(),
+      TeamColor::Blue,
+      GameCommand::Running,
+    );
+
+    assert_eq!(output.len(), 1);
+    assert!(output[0].dribbler_on);
+    assert!(matches!(
+      output[0].move_command,
+      Some(MoveCommand::GlobalVelocity { .. })
     ));
   }
 

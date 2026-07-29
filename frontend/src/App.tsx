@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useViewerSocket } from "./hooks/useViewerSocket";
 import FieldCanvas from "./components/FieldCanvas";
@@ -9,6 +9,7 @@ import ControlPanel from "./components/ControlPanel";
 import TestPanel from "./components/TestPanel";
 import DebugPanel from "./components/DebugPanel";
 import ReplayPanel from "./components/ReplayPanel";
+import DeveloperConsole from "./components/DeveloperConsole";
 import type { GameStateInfo, GoalSummary, ReplayEvent } from "./hooks/useViewerSocket";
 
 declare global {
@@ -18,7 +19,7 @@ declare global {
 }
 
 const FALLBACK_WS_PORT = 8316;
-type ViewerRoute = "default" | "debug" | "debug-big";
+type ViewerRoute = "default" | "debug" | "debug-big" | "dev";
 type DebugTeamFilter = "Blue" | "Yellow" | null;
 
 function resolveWsPort(): number {
@@ -35,6 +36,8 @@ function resolveViewerRoute(): ViewerRoute {
       return "debug";
     case "/debug-big":
       return "debug-big";
+    case "/dev":
+      return "dev";
     default:
       return "default";
   }
@@ -65,13 +68,16 @@ export default function App() {
     sendControl,
     setSpeed,
     moveRobot,
+    moveBall,
     stepReplay,
     skipReplay,
     seekReplay,
     scrubReplay,
     flushReplayScrub,
+    sendDeveloperRequest,
   } =
     useViewerSocket(wsPort);
+  const [developerMode, setDeveloperMode] = useState(route === "dev");
   const control = frame?.control ?? { web_enabled: false, running: true, speed: 1 };
   const selectedWorlds = frame?.selected_worlds ?? [frame?.selected_world ?? 0];
   const teamNames = replayTeamNames(frame?.events ?? [], frame?.replay?.frame_index ?? 0);
@@ -178,12 +184,59 @@ export default function App() {
     stepReplay,
   ]);
 
+  const toggleDeveloperMode = useCallback(() => {
+    setDeveloperMode((enabled) => {
+      if (enabled) {
+        for (const mode of frame?.developer?.schema.modes ?? []) {
+          sendDeveloperRequest({ action: "disable", target: mode.id });
+        }
+      }
+      return !enabled;
+    });
+  }, [frame?.developer?.schema.modes, sendDeveloperRequest]);
+
+  if (developerMode && frame?.developer) {
+    return (
+      <AppShell
+        connected={connected}
+        gameState={gameState}
+        goals={frame.goals ?? defaultGoals}
+        developerAvailable
+        developerMode
+        onToggleDeveloper={toggleDeveloperMode}
+      >
+        <div className="developer-layout">
+          <div className="min-w-0 glass-panel overflow-hidden panel-accent">
+            <FieldCanvas
+              frame={frame}
+              debugTeamFilter={debugTeam}
+              showDebugOverlays={showDebug}
+              onSeekReplay={seekReplay}
+              onScrubReplay={scrubReplay}
+              onScrubReplayEnd={flushReplayScrub}
+              onMoveRobot={moveRobot}
+              onMoveBall={moveBall}
+            />
+          </div>
+          <DeveloperConsole
+            developer={frame.developer}
+            frame={frame}
+            onRequest={sendDeveloperRequest}
+          />
+        </div>
+      </AppShell>
+    );
+  }
+
   if (route === "debug-big") {
     return (
       <AppShell
         connected={connected}
         gameState={gameState}
         goals={frame?.goals ?? defaultGoals}
+        developerAvailable={Boolean(frame?.developer)}
+        developerMode={developerMode}
+        onToggleDeveloper={toggleDeveloperMode}
       >
         <div className="flex-1 grid min-h-0 gap-2 p-2 grid-cols-[minmax(0,1fr)_minmax(420px,0.95fr)]">
           <div className="min-w-0 glass-panel overflow-hidden panel-accent">
@@ -195,6 +248,7 @@ export default function App() {
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
               onMoveRobot={moveRobot}
+              onMoveBall={moveBall}
             />
           </div>
           <div className="min-w-0 glass-panel panel-accent overflow-hidden flex flex-col">
@@ -232,6 +286,9 @@ export default function App() {
       connected={connected}
       gameState={gameState}
       goals={frame?.goals ?? defaultGoals}
+      developerAvailable={Boolean(frame?.developer)}
+      developerMode={developerMode}
+      onToggleDeveloper={toggleDeveloperMode}
     >
       <div className="flex-1 flex min-h-0 gap-2 p-2">
         <div className="flex-1 min-w-0">
@@ -244,6 +301,7 @@ export default function App() {
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
               onMoveRobot={moveRobot}
+              onMoveBall={moveBall}
             />
           </div>
         </div>
@@ -321,11 +379,17 @@ function AppShell({
   gameState,
   goals,
   children,
+  developerAvailable = false,
+  developerMode = false,
+  onToggleDeveloper,
 }: {
   connected: boolean;
   gameState: GameStateInfo | null;
   goals: GoalSummary;
   children: ReactNode;
+  developerAvailable?: boolean;
+  developerMode?: boolean;
+  onToggleDeveloper?: () => void;
 }) {
   return (
     <div className="h-full flex flex-col bg-dot-pattern text-slate-100">
@@ -360,7 +424,21 @@ function AppShell({
 
         <HeaderScoreboard gameState={gameState} goals={goals} />
 
-        <div className="ml-auto flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/30">
+        <div className="ml-auto flex items-center gap-2">
+          {developerAvailable && (
+            <button
+              type="button"
+              className={[
+                "developer-mode-toggle",
+                developerMode ? "developer-mode-toggle-active" : "",
+              ].join(" ")}
+              aria-pressed={developerMode}
+              onClick={onToggleDeveloper}
+            >
+              <span>{developerMode ? "AI LAB" : "DEV"}</span>
+            </button>
+          )}
+          <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/30">
           <span
             className={`inline-block w-2 h-2 rounded-full transition-all duration-300 ${
               connected
@@ -371,6 +449,7 @@ function AppShell({
           <span className="text-xs font-mono text-slate-400">
             {connected ? "LIVE" : "OFFLINE"}
           </span>
+          </div>
         </div>
       </header>
       {children}

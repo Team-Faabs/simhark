@@ -515,7 +515,7 @@ impl World {
     )
   }
 
-  fn teleport_ball(&mut self, tb: &TeleportBall) {
+  pub(crate) fn teleport_ball(&mut self, tb: &TeleportBall) {
     let ball_body = self.physics.ball_body;
     let pos = self.physics.get_body_position(ball_body);
     let vel = self.physics.get_body_linvel(ball_body);
