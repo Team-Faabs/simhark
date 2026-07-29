@@ -34,6 +34,7 @@ interface FieldCanvasProps {
     x: number,
     y: number
   ) => void;
+  onMoveBall?: (worldId: number, x: number, y: number) => void;
 }
 
 const FIELD_GREEN_LIGHT = "#1a5c34";
@@ -65,6 +66,7 @@ const WORLD_COLORS = [
 
 type WorldTint = (typeof WORLD_COLORS)[number];
 type RobotHitTarget = {
+  kind: "robot";
   x: number;
   y: number;
   radius: number;
@@ -73,7 +75,15 @@ type RobotHitTarget = {
   id: number;
   input: string | null;
 };
-type RobotHover = RobotHitTarget & { mouseX: number; mouseY: number };
+type BallHitTarget = {
+  kind: "ball";
+  x: number;
+  y: number;
+  radius: number;
+  worldId: number;
+};
+type HitTarget = RobotHitTarget | BallHitTarget;
+type EntityHover = HitTarget & { mouseX: number; mouseY: number };
 type ViewTransform = {
   zoom: number;
   panX: number;
@@ -88,14 +98,15 @@ export default function FieldCanvas({
   onScrubReplay,
   onScrubReplayEnd,
   onMoveRobot,
+  onMoveBall,
 }: FieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<ViewerFrame | null>(frame);
-  const hitTargetsRef = useRef<RobotHitTarget[]>([]);
+  const hitTargetsRef = useRef<HitTarget[]>([]);
   const viewRef = useRef<ViewTransform>({ zoom: MIN_ZOOM, panX: 0, panY: 0 });
-  const dragRef = useRef<RobotHitTarget | null>(null);
-  const [hover, setHover] = useState<RobotHover | null>(null);
+  const dragRef = useRef<HitTarget | null>(null);
+  const [hover, setHover] = useState<EntityHover | null>(null);
   const [dragging, setDragging] = useState(false);
 
   // Keep latest frame in a ref so the resize observer can redraw without
@@ -197,6 +208,7 @@ export default function FieldCanvas({
         );
         const [x, y] = toCanvas(robot.x, robot.y);
         hitTargetsRef.current.push({
+          kind: "robot",
           x,
           y,
           radius: Math.max(robotRadius * scale, 8),
@@ -225,6 +237,7 @@ export default function FieldCanvas({
         );
         const [x, y] = toCanvas(robot.x, robot.y);
         hitTargetsRef.current.push({
+          kind: "robot",
           x,
           y,
           radius: Math.max(robotRadius * scale, 8),
@@ -240,6 +253,14 @@ export default function FieldCanvas({
       }
 
       drawBall(ctx, toCanvas, scale, ballRadius, state.ball, tint);
+      const [ballX, ballY] = toCanvas(state.ball.x, state.ball.y);
+      hitTargetsRef.current.push({
+        kind: "ball",
+        x: ballX,
+        y: ballY,
+        radius: Math.max(ballRadius * scale, 8),
+        worldId: state.world_id,
+      });
       ctx.restore();
     }
 
@@ -267,7 +288,10 @@ export default function FieldCanvas({
   }, [draw]);
 
   const fieldPositionFromPointer = useCallback(
-    (event: PointerEvent<HTMLDivElement>): [number, number] | null => {
+    (
+      event: PointerEvent<HTMLDivElement>,
+      entityRadius: number
+    ): [number, number] | null => {
       const snapshot = frameRef.current;
       const container = containerRef.current;
       if (!snapshot || !container) return null;
@@ -287,8 +311,8 @@ export default function FieldCanvas({
       const mouseY = event.clientY - rect.top;
       const x = (mouseX - rect.width / 2 - view.panX) / scale;
       const y = (rect.height / 2 + view.panY - mouseY) / scale;
-      const xLimit = Math.max(0, field.field_length / 2 - snapshot.robot_radius);
-      const yLimit = Math.max(0, field.field_width / 2 - snapshot.robot_radius);
+      const xLimit = Math.max(0, field.field_length / 2 - entityRadius);
+      const yLimit = Math.max(0, field.field_width / 2 - entityRadius);
       return [clamp(x, -xLimit, xLimit), clamp(y, -yLimit, yLimit)];
     },
     []
@@ -296,17 +320,29 @@ export default function FieldCanvas({
 
   const handlePointerMove = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      const draggedRobot = dragRef.current;
-      if (draggedRobot) {
-        const position = fieldPositionFromPointer(event);
+      const draggedEntity = dragRef.current;
+      if (draggedEntity) {
+        const snapshot = frameRef.current;
+        const entityRadius =
+          draggedEntity.kind === "robot"
+            ? snapshot?.robot_radius
+            : snapshot?.ball_radius;
+        const position =
+          entityRadius === undefined
+            ? null
+            : fieldPositionFromPointer(event, entityRadius);
         if (position) {
-          onMoveRobot?.(
-            draggedRobot.worldId,
-            draggedRobot.team,
-            draggedRobot.id,
-            position[0],
-            position[1]
-          );
+          if (draggedEntity.kind === "robot") {
+            onMoveRobot?.(
+              draggedEntity.worldId,
+              draggedEntity.team,
+              draggedEntity.id,
+              position[0],
+              position[1]
+            );
+          } else {
+            onMoveBall?.(draggedEntity.worldId, position[0], position[1]);
+          }
         }
         setHover(null);
         return;
@@ -315,7 +351,7 @@ export default function FieldCanvas({
       const rect = event.currentTarget.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
-      let target: RobotHitTarget | null = null;
+      let target: HitTarget | null = null;
       for (let index = hitTargetsRef.current.length - 1; index >= 0; index -= 1) {
         const candidate = hitTargetsRef.current[index];
         if (Math.hypot(candidate.x - mouseX, candidate.y - mouseY) <= candidate.radius + 6) {
@@ -325,12 +361,12 @@ export default function FieldCanvas({
       }
       setHover(target ? { ...target, mouseX, mouseY } : null);
     },
-    [fieldPositionFromPointer, onMoveRobot]
+    [fieldPositionFromPointer, onMoveBall, onMoveRobot]
   );
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if (!onMoveRobot || frameRef.current?.replay.enabled) return;
+      if ((!onMoveRobot && !onMoveBall) || frameRef.current?.replay.enabled) return;
       const rect = event.currentTarget.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
@@ -342,18 +378,34 @@ export default function FieldCanvas({
             candidate.radius + 6
         );
       if (!target) return;
+      if (
+        (target.kind === "robot" && !onMoveRobot) ||
+        (target.kind === "ball" && !onMoveBall)
+      ) {
+        return;
+      }
 
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       dragRef.current = target;
       setDragging(true);
       setHover(null);
-      const position = fieldPositionFromPointer(event);
+      const snapshot = frameRef.current;
+      const entityRadius =
+        target.kind === "robot" ? snapshot?.robot_radius : snapshot?.ball_radius;
+      const position =
+        entityRadius === undefined
+          ? null
+          : fieldPositionFromPointer(event, entityRadius);
       if (position) {
-        onMoveRobot(target.worldId, target.team, target.id, position[0], position[1]);
+        if (target.kind === "robot") {
+          onMoveRobot?.(target.worldId, target.team, target.id, position[0], position[1]);
+        } else {
+          onMoveBall?.(target.worldId, position[0], position[1]);
+        }
       }
     },
-    [fieldPositionFromPointer, onMoveRobot]
+    [fieldPositionFromPointer, onMoveBall, onMoveRobot]
   );
 
   const handlePointerEnd = useCallback((event: PointerEvent<HTMLDivElement>) => {
@@ -446,17 +498,23 @@ export default function FieldCanvas({
           }}
         >
           <div className="mb-1 flex items-center gap-2 font-mono text-[10px]">
-            <span className={hover.team === "Blue" ? "text-blue-300" : "text-amber-300"}>
-              {hover.team} {hover.id}
-            </span>
+            {hover.kind === "robot" ? (
+              <span className={hover.team === "Blue" ? "text-blue-300" : "text-amber-300"}>
+                {hover.team} {hover.id}
+              </span>
+            ) : (
+              <span className="text-orange-300">Ball</span>
+            )}
             <span className="text-slate-500">world {hover.worldId}</span>
             {!frame?.replay.enabled && (
               <span className="ml-auto text-cyan-300">drag to move</span>
             )}
           </div>
-          <div className="max-h-24 overflow-hidden break-words font-mono leading-snug text-slate-300">
-            {hover.input ?? "No recorded input for this robot in this frame"}
-          </div>
+          {hover.kind === "robot" && (
+            <div className="max-h-24 overflow-hidden break-words font-mono leading-snug text-slate-300">
+              {hover.input ?? "No recorded input for this robot in this frame"}
+            </div>
+          )}
         </div>
       )}
     </div>
