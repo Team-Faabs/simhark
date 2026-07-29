@@ -34,6 +34,12 @@ interface FieldCanvasProps {
     x: number,
     y: number
   ) => void;
+  onRotateRobot?: (
+    worldId: number,
+    team: "Blue" | "Yellow",
+    id: number,
+    orientation: number
+  ) => void;
   onMoveBall?: (worldId: number, x: number, y: number) => void;
 }
 
@@ -48,6 +54,8 @@ const PADDING = 36;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
 const WHEEL_ZOOM_SPEED = 0.0015;
+const KEYBOARD_ROTATION_STEP = Math.PI / 36;
+const SNAPPED_ROTATION_STEP = Math.PI / 4;
 
 const WORLD_COLORS = [
   { base: "#38bdf8", light: "#bae6fd", dark: "#0369a1" },
@@ -70,6 +78,20 @@ type RobotHitTarget = {
   x: number;
   y: number;
   radius: number;
+  orientation: number;
+  worldId: number;
+  team: "Blue" | "Yellow";
+  id: number;
+  input: string | null;
+};
+type RobotRotateHitTarget = {
+  kind: "robot-rotate";
+  x: number;
+  y: number;
+  radius: number;
+  centerX: number;
+  centerY: number;
+  orientation: number;
   worldId: number;
   team: "Blue" | "Yellow";
   id: number;
@@ -82,7 +104,7 @@ type BallHitTarget = {
   radius: number;
   worldId: number;
 };
-type HitTarget = RobotHitTarget | BallHitTarget;
+type HitTarget = RobotHitTarget | RobotRotateHitTarget | BallHitTarget;
 type EntityHover = HitTarget & { mouseX: number; mouseY: number };
 type ViewTransform = {
   zoom: number;
@@ -98,6 +120,7 @@ export default function FieldCanvas({
   onScrubReplay,
   onScrubReplayEnd,
   onMoveRobot,
+  onRotateRobot,
   onMoveBall,
 }: FieldCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -212,6 +235,25 @@ export default function FieldCanvas({
           x,
           y,
           radius: Math.max(robotRadius * scale, 8),
+          orientation: robot.orientation,
+          worldId: state.world_id,
+          team: robot.team,
+          id: robot.id,
+          input:
+            debug?.message ??
+            debug?.task ??
+            inputLookup.get(robotInputKey(state.world_id, robot.team, robot.id)) ??
+            null,
+        });
+        const handleDistance = Math.max(robotRadius * scale, 8) + 8;
+        hitTargetsRef.current.push({
+          kind: "robot-rotate",
+          x: x + Math.cos(robot.orientation) * handleDistance,
+          y: y - Math.sin(robot.orientation) * handleDistance,
+          radius: 8,
+          centerX: x,
+          centerY: y,
+          orientation: robot.orientation,
           worldId: state.world_id,
           team: robot.team,
           id: robot.id,
@@ -241,6 +283,25 @@ export default function FieldCanvas({
           x,
           y,
           radius: Math.max(robotRadius * scale, 8),
+          orientation: robot.orientation,
+          worldId: state.world_id,
+          team: robot.team,
+          id: robot.id,
+          input:
+            debug?.message ??
+            debug?.task ??
+            inputLookup.get(robotInputKey(state.world_id, robot.team, robot.id)) ??
+            null,
+        });
+        const handleDistance = Math.max(robotRadius * scale, 8) + 8;
+        hitTargetsRef.current.push({
+          kind: "robot-rotate",
+          x: x + Math.cos(robot.orientation) * handleDistance,
+          y: y - Math.sin(robot.orientation) * handleDistance,
+          radius: 8,
+          centerX: x,
+          centerY: y,
+          orientation: robot.orientation,
           worldId: state.world_id,
           team: robot.team,
           id: robot.id,
@@ -322,6 +383,24 @@ export default function FieldCanvas({
     (event: PointerEvent<HTMLDivElement>) => {
       const draggedEntity = dragRef.current;
       if (draggedEntity) {
+        if (draggedEntity.kind === "robot-rotate") {
+          const rect = event.currentTarget.getBoundingClientRect();
+          const pointerX = event.clientX - rect.left;
+          const pointerY = event.clientY - rect.top;
+          const orientation = Math.atan2(
+            draggedEntity.centerY - pointerY,
+            pointerX - draggedEntity.centerX
+          );
+          draggedEntity.orientation = orientation;
+          onRotateRobot?.(
+            draggedEntity.worldId,
+            draggedEntity.team,
+            draggedEntity.id,
+            orientation
+          );
+          setHover(null);
+          return;
+        }
         const snapshot = frameRef.current;
         const entityRadius =
           draggedEntity.kind === "robot"
@@ -361,12 +440,15 @@ export default function FieldCanvas({
       }
       setHover(target ? { ...target, mouseX, mouseY } : null);
     },
-    [fieldPositionFromPointer, onMoveBall, onMoveRobot]
+    [fieldPositionFromPointer, onMoveBall, onMoveRobot, onRotateRobot]
   );
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if ((!onMoveRobot && !onMoveBall) || frameRef.current?.replay.enabled) return;
+      if (
+        (!onMoveRobot && !onRotateRobot && !onMoveBall) ||
+        frameRef.current?.replay.enabled
+      ) return;
       const rect = event.currentTarget.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
@@ -380,6 +462,7 @@ export default function FieldCanvas({
       if (!target) return;
       if (
         (target.kind === "robot" && !onMoveRobot) ||
+        (target.kind === "robot-rotate" && !onRotateRobot) ||
         (target.kind === "ball" && !onMoveBall)
       ) {
         return;
@@ -390,6 +473,15 @@ export default function FieldCanvas({
       dragRef.current = target;
       setDragging(true);
       setHover(null);
+      if (target.kind === "robot-rotate") {
+        const orientation = Math.atan2(
+          target.centerY - mouseY,
+          mouseX - target.centerX
+        );
+        target.orientation = orientation;
+        onRotateRobot?.(target.worldId, target.team, target.id, orientation);
+        return;
+      }
       const snapshot = frameRef.current;
       const entityRadius =
         target.kind === "robot" ? snapshot?.robot_radius : snapshot?.ball_radius;
@@ -405,7 +497,7 @@ export default function FieldCanvas({
         }
       }
     },
-    [fieldPositionFromPointer, onMoveBall, onMoveRobot]
+    [fieldPositionFromPointer, onMoveBall, onMoveRobot, onRotateRobot]
   );
 
   const handlePointerEnd = useCallback((event: PointerEvent<HTMLDivElement>) => {
@@ -416,6 +508,51 @@ export default function FieldCanvas({
     dragRef.current = null;
     setDragging(false);
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const draggedEntity = dragRef.current;
+      if (
+        !draggedEntity ||
+        draggedEntity.kind === "ball" ||
+        !onRotateRobot
+      ) {
+        return;
+      }
+
+      const direction =
+        event.code === "KeyA" || event.code === "ArrowLeft"
+          ? 1
+          : event.code === "KeyD" || event.code === "ArrowRight"
+            ? -1
+            : 0;
+      if (direction === 0) return;
+
+      event.preventDefault();
+      const orientation = event.ctrlKey
+        ? nextSnappedAngle(
+            draggedEntity.orientation,
+            direction,
+            SNAPPED_ROTATION_STEP
+          )
+        : normalizeAngle(
+            draggedEntity.orientation +
+              direction *
+                KEYBOARD_ROTATION_STEP *
+                (event.shiftKey ? 10 : 1)
+          );
+      draggedEntity.orientation = orientation;
+      onRotateRobot(
+        draggedEntity.worldId,
+        draggedEntity.team,
+        draggedEntity.id,
+        orientation
+      );
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onRotateRobot]);
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
@@ -471,7 +608,15 @@ export default function FieldCanvas({
     <div
       ref={containerRef}
       className={`w-full h-full relative touch-none ${
-        dragging ? "cursor-grabbing" : hover && !frame?.replay.enabled ? "cursor-grab" : ""
+        dragging
+          ? dragRef.current?.kind === "robot-rotate"
+            ? "cursor-crosshair"
+            : "cursor-grabbing"
+          : hover && !frame?.replay.enabled
+            ? hover.kind === "robot-rotate"
+              ? "cursor-crosshair"
+              : "cursor-grab"
+            : ""
       }`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -498,7 +643,7 @@ export default function FieldCanvas({
           }}
         >
           <div className="mb-1 flex items-center gap-2 font-mono text-[10px]">
-            {hover.kind === "robot" ? (
+            {hover.kind !== "ball" ? (
               <span className={hover.team === "Blue" ? "text-blue-300" : "text-amber-300"}>
                 {hover.team} {hover.id}
               </span>
@@ -507,12 +652,19 @@ export default function FieldCanvas({
             )}
             <span className="text-slate-500">world {hover.worldId}</span>
             {!frame?.replay.enabled && (
-              <span className="ml-auto text-cyan-300">drag to move</span>
+              <span className="ml-auto text-cyan-300">
+                {hover.kind === "robot-rotate" ? "drag to rotate" : "drag to move"}
+              </span>
             )}
           </div>
-          {hover.kind === "robot" && (
+          {hover.kind !== "ball" && (
             <div className="max-h-24 overflow-hidden break-words font-mono leading-snug text-slate-300">
               {hover.input ?? "No recorded input for this robot in this frame"}
+            </div>
+          )}
+          {hover.kind === "robot" && !frame?.replay.enabled && (
+            <div className="mt-1 font-mono text-[10px] text-slate-500">
+              A/← · D/→ while dragging · Shift ×10 · Ctrl snaps 45°
             </div>
           )}
         </div>
@@ -681,6 +833,22 @@ function robotInputKey(worldId: number, team: "Blue" | "Yellow", id: number): st
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeAngle(angle: number): number {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
+function nextSnappedAngle(
+  angle: number,
+  direction: number,
+  step: number
+): number {
+  const stepIndex =
+    direction > 0
+      ? Math.floor(angle / step + 1e-9) + 1
+      : Math.ceil(angle / step - 1e-9) - 1;
+  return normalizeAngle(stepIndex * step);
 }
 
 function drawField(

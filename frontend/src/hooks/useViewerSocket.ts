@@ -343,6 +343,21 @@ export function useViewerSocket(wsPort: number) {
     []
   );
 
+  const rotateRobot = useCallback(
+    (
+      worldId: number,
+      team: "Blue" | "Yellow",
+      id: number,
+      orientation: number
+    ) => {
+      const socket = socketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(`robot:rotate:${worldId}:${team}:${id}:${orientation}`);
+      }
+    },
+    []
+  );
+
   const setRobotPresence = useCallback(
     (worldId: number, team: "Blue" | "Yellow", id: number, present: boolean) => {
       const socket = socketRef.current;
@@ -419,6 +434,7 @@ export function useViewerSocket(wsPort: number) {
     sendControl,
     setSpeed,
     moveRobot,
+    rotateRobot,
     setRobotPresence,
     moveBall,
     sendDeveloperRequest,

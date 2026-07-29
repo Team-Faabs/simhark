@@ -70,6 +70,7 @@ export default function App() {
     sendControl,
     setSpeed,
     moveRobot,
+    rotateRobot,
     setRobotPresence,
     moveBall,
     stepReplay,
@@ -216,6 +217,7 @@ export default function App() {
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
               onMoveRobot={moveRobot}
+              onRotateRobot={rotateRobot}
               onMoveBall={moveBall}
             />
           </div>
@@ -286,6 +288,7 @@ export default function App() {
               onScrubReplay={scrubReplay}
               onScrubReplayEnd={flushReplayScrub}
               onMoveRobot={moveRobot}
+              onRotateRobot={rotateRobot}
               onMoveBall={moveBall}
             />
           </div>
