@@ -599,6 +599,10 @@ impl World {
       }
     };
 
+    if tr.present.is_some() && self.holder == Some((tr.team, tr.id)) {
+      self.holder = None;
+    }
+
     let sims = match tr.team {
       TeamColor::Blue => &mut self.blue_sims,
       TeamColor::Yellow => &mut self.yellow_sims,
@@ -625,6 +629,10 @@ impl World {
 
     if let Some(present) = tr.present {
       sim.is_on = present;
+      sim.dribbler_on = false;
+      sim.holding_ball = false;
+      sim.kick_countdown = 0;
+      sim.kick_type = KickType::None;
       if !present {
         let team_lane = match tr.team {
           TeamColor::Blue => 0.0,

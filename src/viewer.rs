@@ -229,6 +229,15 @@ pub struct RobotMoveRequest {
 
 type RobotMoveKey = (usize, TeamColor, usize);
 
+/// A robot activation change requested from the browser viewer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RobotPresenceRequest {
+  pub world_id: usize,
+  pub team: TeamColor,
+  pub id: usize,
+  pub present: bool,
+}
+
 /// A ball reposition requested by dragging it in the browser viewer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BallMoveRequest {
@@ -315,6 +324,7 @@ pub struct ViewerServer {
   debug: Arc<Mutex<HashMap<usize, ViewerDebugSnapshot>>>,
   control: Arc<WebControlState>,
   robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
+  robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
   ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
   _http_thread: thread::JoinHandle<()>,
   _ws_thread: thread::JoinHandle<()>,
@@ -367,6 +377,7 @@ impl ViewerServer {
     let debug = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(WebControlState::default());
     let robot_move_requests = Arc::new(Mutex::new(HashMap::new()));
+    let robot_presence_requests = Arc::new(Mutex::new(HashMap::new()));
     let ball_move_requests = Arc::new(Mutex::new(HashMap::new()));
     control.frame_seek_requested.store(-1, Ordering::Relaxed);
     // When web control is disabled the simulator is considered always
@@ -385,6 +396,7 @@ impl ViewerServer {
       let selected_worlds = Arc::clone(&selected_worlds);
       let control_for_ws = Arc::clone(&control);
       let robot_move_requests = Arc::clone(&robot_move_requests);
+      let robot_presence_requests = Arc::clone(&robot_presence_requests);
       let ball_move_requests = Arc::clone(&ball_move_requests);
       let developer_requests = Arc::clone(&developer_requests);
       thread::spawn(move || {
@@ -395,6 +407,7 @@ impl ViewerServer {
           selected_worlds,
           control_for_ws,
           robot_move_requests,
+          robot_presence_requests,
           ball_move_requests,
           developer_requests,
         )
@@ -420,6 +433,7 @@ impl ViewerServer {
       debug,
       control,
       robot_move_requests,
+      robot_presence_requests,
       ball_move_requests,
       _http_thread: http_thread,
       _ws_thread: ws_thread,
@@ -488,13 +502,14 @@ impl ViewerServer {
     }
   }
 
-  /// Apply the latest browser drag request for each robot and ball to its
-  /// simulation world. Returns the number of entities that were repositioned.
+  /// Apply the latest browser edits for robots and balls to their simulation
+  /// worlds. Returns the number of entities that were changed.
   ///
   /// Applications with a viewer should call this once per loop, including
   /// while paused, so dragging remains responsive without advancing physics.
   pub fn apply_robot_move_requests(&self, engine: &mut SimulationEngine) -> usize {
     let requests = std::mem::take(&mut *self.robot_move_requests.lock());
+    let presence_requests = std::mem::take(&mut *self.robot_presence_requests.lock());
     let ball_requests = std::mem::take(&mut *self.ball_move_requests.lock());
     let mut applied = 0;
     for request in requests.into_values() {
@@ -524,6 +539,50 @@ impl ViewerServer {
         vy: Some(0.0),
         v_angular: Some(0.0),
         present: None,
+      });
+      applied += 1;
+    }
+    for request in presence_requests.into_values() {
+      let Some(world) = engine.worlds.get_mut(request.world_id) else {
+        continue;
+      };
+      let sims = match request.team {
+        TeamColor::Blue => &world.blue_sims,
+        TeamColor::Yellow => &world.yellow_sims,
+      };
+      let Some(robot) = sims.get(request.id) else {
+        continue;
+      };
+      if robot.is_on == request.present {
+        continue;
+      }
+
+      let (x, y, orientation) = if request.present {
+        let robot_count = sims.len();
+        let spacing = world.config.field.field_width / (robot_count as f64 + 1.0);
+        let x = match request.team {
+          TeamColor::Blue => -world.config.field.field_length / 4.0,
+          TeamColor::Yellow => world.config.field.field_length / 4.0,
+        };
+        let y = -world.config.field.field_width / 2.0 + spacing * (request.id as f64 + 1.0);
+        let orientation = match request.team {
+          TeamColor::Blue => 0.0,
+          TeamColor::Yellow => std::f64::consts::PI,
+        };
+        (Some(x), Some(y), Some(orientation))
+      } else {
+        (None, None, None)
+      };
+      world.teleport_robot(&TeleportRobot {
+        id: request.id,
+        team: request.team,
+        x,
+        y,
+        orientation,
+        vx: Some(0.0),
+        vy: Some(0.0),
+        v_angular: Some(0.0),
+        present: Some(request.present),
       });
       applied += 1;
     }
@@ -1064,6 +1123,7 @@ fn run_websocket_server(
   selected_worlds: Arc<Mutex<Vec<usize>>>,
   control: Arc<WebControlState>,
   robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
+  robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
   ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
   developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
 ) {
@@ -1077,6 +1137,7 @@ fn run_websocket_server(
     let selected_worlds = Arc::clone(&selected_worlds);
     let control = Arc::clone(&control);
     let robot_move_requests = Arc::clone(&robot_move_requests);
+    let robot_presence_requests = Arc::clone(&robot_presence_requests);
     let ball_move_requests = Arc::clone(&ball_move_requests);
     let developer_requests = Arc::clone(&developer_requests);
     thread::spawn(move || {
@@ -1099,6 +1160,7 @@ fn run_websocket_server(
               &selected_worlds,
               &control,
               &robot_move_requests,
+              &robot_presence_requests,
               &ball_move_requests,
               &developer_requests,
             ),
@@ -1150,6 +1212,7 @@ fn handle_client_message(
   selected_worlds: &Mutex<Vec<usize>>,
   control: &WebControlState,
   robot_move_requests: &Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>,
+  robot_presence_requests: &Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>,
   ball_move_requests: &Mutex<HashMap<usize, BallMoveRequest>>,
   developer_requests: &Mutex<HashMap<String, DeveloperRequest>>,
 ) {
@@ -1261,6 +1324,13 @@ fn handle_client_message(
     return;
   }
 
+  if let Some(request) = parse_robot_presence_request(message) {
+    robot_presence_requests
+      .lock()
+      .insert((request.world_id, request.team, request.id), request);
+    return;
+  }
+
   if let Some(request) = parse_ball_move_request(message) {
     ball_move_requests.lock().insert(request.world_id, request);
   }
@@ -1287,6 +1357,32 @@ fn parse_robot_move_request(message: &str) -> Option<RobotMoveRequest> {
     id,
     x,
     y,
+  })
+}
+
+fn parse_robot_presence_request(message: &str) -> Option<RobotPresenceRequest> {
+  let value = message.strip_prefix("robot:presence:")?;
+  let mut parts = value.split(':');
+  let world_id = parts.next()?.parse().ok()?;
+  let team = match parts.next()? {
+    "Blue" => TeamColor::Blue,
+    "Yellow" => TeamColor::Yellow,
+    _ => return None,
+  };
+  let id = parts.next()?.parse().ok()?;
+  let present = match parts.next()? {
+    "true" => true,
+    "false" => false,
+    _ => return None,
+  };
+  if parts.next().is_some() {
+    return None;
+  }
+  Some(RobotPresenceRequest {
+    world_id,
+    team,
+    id,
+    present,
   })
 }
 
@@ -1361,8 +1457,8 @@ fn render_index(ws_port: u16) -> String {
 #[cfg(test)]
 mod tests {
   use super::{
-    BallMoveRequest, DeveloperRequest, RobotMoveRequest, parse_ball_move_request,
-    parse_robot_move_request,
+    BallMoveRequest, DeveloperRequest, RobotMoveRequest, RobotPresenceRequest,
+    parse_ball_move_request, parse_robot_move_request, parse_robot_presence_request,
   };
   use crate::state::TeamColor;
 
@@ -1386,6 +1482,44 @@ mod tests {
     assert_eq!(parse_robot_move_request("robot:move:0:Blue:1:NaN:0"), None);
     assert_eq!(
       parse_robot_move_request("robot:move:0:Blue:1:0:0:extra"),
+      None
+    );
+  }
+
+  #[test]
+  fn parses_robot_presence_request() {
+    assert_eq!(
+      parse_robot_presence_request("robot:presence:2:Blue:4:false"),
+      Some(RobotPresenceRequest {
+        world_id: 2,
+        team: TeamColor::Blue,
+        id: 4,
+        present: false,
+      })
+    );
+    assert_eq!(
+      parse_robot_presence_request("robot:presence:0:Yellow:1:true"),
+      Some(RobotPresenceRequest {
+        world_id: 0,
+        team: TeamColor::Yellow,
+        id: 1,
+        present: true,
+      })
+    );
+  }
+
+  #[test]
+  fn rejects_invalid_robot_presence_request() {
+    assert_eq!(
+      parse_robot_presence_request("robot:presence:0:Green:1:true"),
+      None
+    );
+    assert_eq!(
+      parse_robot_presence_request("robot:presence:0:Blue:1:yes"),
+      None
+    );
+    assert_eq!(
+      parse_robot_presence_request("robot:presence:0:Blue:1:false:extra"),
       None
     );
   }

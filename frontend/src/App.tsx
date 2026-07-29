@@ -6,6 +6,7 @@ import StatsPanel from "./components/StatsPanel";
 import GameStatePanel from "./components/GameStatePanel";
 import WorldSelector from "./components/WorldSelector";
 import ControlPanel from "./components/ControlPanel";
+import RobotRosterPanel from "./components/RobotRosterPanel";
 import TestPanel from "./components/TestPanel";
 import DebugPanel from "./components/DebugPanel";
 import ReplayPanel from "./components/ReplayPanel";
@@ -68,6 +69,7 @@ export default function App() {
     sendControl,
     setSpeed,
     moveRobot,
+    setRobotPresence,
     moveBall,
     stepReplay,
     skipReplay,
@@ -253,6 +255,7 @@ export default function App() {
           </div>
           <div className="min-w-0 glass-panel panel-accent overflow-hidden flex flex-col">
             <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+            <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
             <ReplayPanel
               replay={frame?.replay ?? null}
               events={frame?.events ?? []}
@@ -308,6 +311,7 @@ export default function App() {
 
         <div className="w-88 shrink-0 glass-panel panel-accent flex flex-col overflow-y-auto overflow-x-hidden">
           <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
+          <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
           <ReplayPanel
             replay={frame?.replay ?? null}
             events={frame?.events ?? []}
