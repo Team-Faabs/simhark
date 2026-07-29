@@ -119,26 +119,32 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!frame?.replay?.enabled) return;
+    if (!control.web_enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(target.tagName)) return;
-      if (event.code === "Comma" || event.code === "ArrowLeft") {
+      if (
+        frame?.replay?.enabled &&
+        (event.code === "Comma" || event.code === "ArrowLeft")
+      ) {
         event.preventDefault();
         stepReplay(-replayStepSize(event));
         return;
       }
-      if (event.code === "Period" || event.code === "ArrowRight") {
+      if (
+        frame?.replay?.enabled &&
+        (event.code === "Period" || event.code === "ArrowRight")
+      ) {
         event.preventDefault();
         stepReplay(replayStepSize(event));
         return;
       }
-      if (event.code === "KeyJ") {
+      if (frame?.replay?.enabled && event.code === "KeyJ") {
         event.preventDefault();
         skipReplaySeconds(-10);
         return;
       }
-      if (event.code === "KeyL") {
+      if (frame?.replay?.enabled && event.code === "KeyL") {
         event.preventDefault();
         skipReplaySeconds(10);
         return;
@@ -181,6 +187,7 @@ export default function App() {
       window.removeEventListener("keyup", onKeyUp);
     };
   }, [
+    control.web_enabled,
     frame?.replay?.enabled,
     control.running,
     control.speed,
@@ -228,9 +235,9 @@ export default function App() {
                 onChange={selectWorkspace}
               />
             )}
+            <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
             {activeWorkspace === "regular" ? (
               <>
-                <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
                 <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
                 <ReplayPanel
                   replay={frame?.replay ?? null}
@@ -301,9 +308,9 @@ export default function App() {
               onChange={selectWorkspace}
             />
           )}
+          <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
           {activeWorkspace === "regular" ? (
             <>
-              <ControlPanel control={control} onSend={sendControl} onSpeed={setSpeed} />
               <RobotRosterPanel frame={frame} onSetPresence={setRobotPresence} />
               <ReplayPanel
                 replay={frame?.replay ?? null}

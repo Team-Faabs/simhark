@@ -213,6 +213,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
+        v.enable_web_control_running();
         configure_developer_console(
           &v,
           mc.dev,
@@ -253,6 +254,38 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
+      if v.take_stop_request() {
+        break;
+      }
+      if v.take_restart_request() {
+        engine = SimulationEngine::new(1, cfg.clone());
+        blue_ctrl =
+          (bots.blue > 0).then(|| build_controller(&mc.blue, TeamColor::Blue, bots.blue as u8));
+        yellow_ctrl = (bots.yellow > 0)
+          .then(|| build_controller(&mc.yellow, TeamColor::Yellow, bots.yellow as u8));
+        director = MatchDirector::new(cfg.clone(), duration)
+          .with_bot_counts(physical_bots.blue, physical_bots.yellow);
+        director.set_teleport_ball_on_no_progress(mc.teleport_ball_on_no_progress);
+        evaluator = Evaluator::new(cfg.clone(), blue_name.clone(), yellow_name.clone());
+        #[cfg(feature = "referris")]
+        {
+          referris = referris_autoref::ReferrisAutoref::new();
+        }
+        pickup_validator = PickupValidator::default();
+        command_counter = 1;
+        let kickoff = director.kickoff_reset();
+        state = engine
+          .step_with_commands(std::slice::from_ref(&kickoff))
+          .remove(0);
+        v.reset_goals();
+        configure_developer_console(
+          v,
+          mc.dev,
+          blue_ctrl.as_deref(),
+          yellow_ctrl.as_deref(),
+          director.teleport_ball_on_no_progress(),
+        );
+      }
       apply_developer_requests(
         v,
         mc.dev,
@@ -275,6 +308,11 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
       }
       if v.apply_robot_move_requests(&mut engine) > 0 {
         state = engine.world(0).get_state();
+      }
+      if !v.is_running() {
+        v.publish(&state);
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        continue;
       }
     }
 
@@ -389,7 +427,12 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
       v.publish(&new_state);
     }
     if pace {
-      std::thread::sleep(std::time::Duration::from_millis(16));
+      let delay = std::time::Duration::from_millis(16);
+      #[cfg(feature = "viewer")]
+      let delay = viewer
+        .as_ref()
+        .map_or(delay, |viewer| viewer.scaled_sleep(delay));
+      std::thread::sleep(delay);
     }
 
     state = new_state;

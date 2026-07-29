@@ -469,8 +469,18 @@ impl ViewerServer {
   /// stopped state; the application is expected to gate stepping on
   /// [`Self::is_running`] and react to [`Self::take_restart_request`].
   pub fn enable_web_control(&self) {
+    self.enable_web_control_with_running(false);
+  }
+
+  /// Opt in to web-driven playback control without stopping an already
+  /// running simulation.
+  pub fn enable_web_control_running(&self) {
+    self.enable_web_control_with_running(true);
+  }
+
+  fn enable_web_control_with_running(&self, running: bool) {
     self.control.enabled.store(true, Ordering::Relaxed);
-    self.control.running.store(false, Ordering::Relaxed);
+    self.control.running.store(running, Ordering::Relaxed);
     self
       .control
       .restart_requested

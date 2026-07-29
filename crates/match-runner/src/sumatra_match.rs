@@ -156,6 +156,7 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
+        v.enable_web_control_running();
         println!("viewer: {}", vc.http_url());
         Some(v)
       }
@@ -183,10 +184,39 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
   let mut command_counter: u32 = 1;
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
-    if let Some(v) = &viewer
-      && v.apply_robot_move_requests(&mut engine) > 0
-    {
-      state = engine.world(0).get_state();
+    if let Some(v) = &viewer {
+      if v.take_stop_request() {
+        break;
+      }
+      if v.take_restart_request() {
+        engine = SimulationEngine::new(1, cfg.clone());
+        server.reset_tracking();
+        blue_ctrl = (bots.blue > 0 && !mc.blue.is_external())
+          .then(|| build_controller(&mc.blue, TeamColor::Blue, bots.blue as u8));
+        yellow_ctrl = (bots.yellow > 0 && !mc.yellow.is_external())
+          .then(|| build_controller(&mc.yellow, TeamColor::Yellow, bots.yellow as u8));
+        director = MatchDirector::new(cfg.clone(), mc.seconds)
+          .with_bot_counts(physical_bots.blue, physical_bots.yellow);
+        evaluator = Evaluator::new(cfg.clone(), blue_name.clone(), yellow_name.clone());
+        #[cfg(feature = "referris")]
+        {
+          referris = crate::referris_autoref::ReferrisAutoref::new();
+        }
+        pickup_validator = PickupValidator::default();
+        command_counter = 1;
+        let kickoff = director.kickoff_reset();
+        state = pop_state(server.step_with_local_commands(&mut engine, &[kickoff])?)
+          .context("restart step produced no state")?;
+        v.reset_goals();
+      }
+      if v.apply_robot_move_requests(&mut engine) > 0 {
+        state = engine.world(0).get_state();
+      }
+      if !v.is_running() {
+        v.publish(&state);
+        std::thread::sleep(TICK);
+        continue;
+      }
     }
 
     let mut wc = director.update(&state);
@@ -291,7 +321,13 @@ fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
       break;
     }
 
-    std::thread::sleep(TICK);
+    #[cfg(feature = "viewer")]
+    let tick = viewer
+      .as_ref()
+      .map_or(TICK, |viewer| viewer.scaled_sleep(TICK));
+    #[cfg(not(feature = "viewer"))]
+    let tick = TICK;
+    std::thread::sleep(tick);
     state = new_state;
   }
 

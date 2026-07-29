@@ -40,7 +40,7 @@ export default function ControlPanel({ control, onSend, onSpeed }: ControlPanelP
                 : "bg-slate-500"
             }`}
           />
-          {control.running ? "running" : "stopped"}
+          {control.running ? "running" : "paused"}
         </span>
       </div>
 
