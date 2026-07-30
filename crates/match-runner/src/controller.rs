@@ -34,6 +34,14 @@ pub enum GameCommand {
 pub trait Controller {
   fn name(&self) -> &str;
   #[cfg(feature = "viewer")]
+  fn attach_interface(
+    &mut self,
+    _handle: &webinterface_core::InterfaceHandle,
+    _session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), String> {
+    Ok(())
+  }
+  #[cfg(feature = "viewer")]
   fn developer_schema(&self) -> Option<serde_json::Value> {
     None
   }
@@ -89,6 +97,18 @@ fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
 impl<A: Ai + Send> Controller for FaabsController<A> {
   fn name(&self) -> &str {
     &self.name
+  }
+
+  #[cfg(feature = "viewer")]
+  fn attach_interface(
+    &mut self,
+    handle: &webinterface_core::InterfaceHandle,
+    session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), String> {
+    self
+      .faabs
+      .attach_shared_interface(handle, session_id)
+      .map_err(|error| error.to_string())
   }
 
   #[cfg(feature = "viewer-debug")]

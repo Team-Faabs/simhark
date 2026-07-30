@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{Error, Result};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::thread;
@@ -11,8 +11,15 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
-use tungstenite::{Message, accept};
+use webinterface_assets::embedded_assets;
+use webinterface_core::{InterfaceConfig, InterfaceHost, InterfaceHostGuard, SystemPublisher};
+use webinterface_protocol as interface_protocol;
+use webinterface_protocol::{
+  Capability as InterfaceCapability, CommandStatus as InterfaceCommandStatus,
+  SessionId as InterfaceSessionId, SessionKind as InterfaceSessionKind,
+  SessionLifecycle as InterfaceSessionLifecycle, SimharkCommand, SystemCommand,
+  SystemDescriptor as InterfaceSystemDescriptor, SystemKind as InterfaceSystemKind,
+};
 
 use crate::command::{TeleportBall, TeleportRobot};
 use crate::config::{FieldConfig, WorldConfig};
@@ -32,7 +39,10 @@ impl Default for ViewerConfig {
   fn default() -> Self {
     Self {
       host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-      http_port: 8315,
+      http_port: std::env::var("SIMHARK_VIEWER_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8315),
     }
   }
 }
@@ -347,8 +357,12 @@ pub struct ViewerServer {
   robot_rotate_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>>,
   robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
   ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
-  _http_thread: thread::JoinHandle<()>,
-  _ws_thread: thread::JoinHandle<()>,
+  interface_publisher: SystemPublisher,
+  interface_session: InterfaceSessionId,
+  interface_handle: webinterface_core::InterfaceHandle,
+  interface_session_terminal: AtomicBool,
+  command_thread: Option<thread::JoinHandle<()>>,
+  _interface_host: InterfaceHostGuard,
 }
 
 #[derive(Serialize)]
@@ -374,18 +388,336 @@ struct ViewerFrame<'a> {
   debug: Option<ViewerDebugSnapshot>,
 }
 
+fn simhark_capabilities() -> Vec<InterfaceCapability> {
+  [
+    ("simhark.lifecycle", true),
+    ("simhark.speed", true),
+    ("simhark.replay", true),
+    ("simhark.world_selection", true),
+    ("simhark.move_robot", true),
+    ("simhark.rotate_robot", true),
+    ("simhark.robot_presence", true),
+    ("simhark.move_ball", true),
+    ("simhark.developer", true),
+    ("simhark.world_state", false),
+  ]
+  .into_iter()
+  .map(|(id, mutable)| InterfaceCapability {
+    id: id.into(),
+    mutable,
+    description: id.replace('.', " "),
+  })
+  .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_interface_commands(
+  commands: &mut tokio::sync::mpsc::UnboundedReceiver<webinterface_core::QueuedSystemCommand>,
+  selected_world: Arc<AtomicUsize>,
+  selected_worlds: Arc<Mutex<Vec<usize>>>,
+  control: Arc<WebControlState>,
+  robot_move_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>>,
+  robot_rotate_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>>,
+  robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
+  ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
+  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
+  publisher: SystemPublisher,
+) {
+  while let Some(queued) = commands.blocking_recv() {
+    let result = match queued.command {
+      SystemCommand::Simhark(command) => apply_simhark_command(
+        command,
+        &selected_world,
+        &selected_worlds,
+        &control,
+        &robot_move_requests,
+        &robot_rotate_requests,
+        &robot_presence_requests,
+        &ball_move_requests,
+      ),
+      SystemCommand::Developer(command) => {
+        let request = match command {
+          interface_protocol::DeveloperCommand::Activate {
+            target,
+            kind,
+            entry,
+            config,
+            params,
+          } => DeveloperRequest::Activate {
+            target,
+            kind,
+            entry,
+            config,
+            params,
+          },
+          interface_protocol::DeveloperCommand::Disable { target } => {
+            DeveloperRequest::Disable { target }
+          }
+          interface_protocol::DeveloperCommand::SwitchAi { target, ai } => {
+            DeveloperRequest::SwitchAi { target, ai }
+          }
+          interface_protocol::DeveloperCommand::SetBallRecovery { target, enabled } => {
+            DeveloperRequest::SetBallRecovery { target, enabled }
+          }
+        };
+        developer_requests
+          .lock()
+          .insert(request.target().to_owned(), request);
+        Ok(())
+      }
+      _ => Err("unsupported command for simhark".to_string()),
+    };
+    match result {
+      Ok(()) => publisher.acknowledge(
+        queued.browser_command_id,
+        InterfaceCommandStatus::Applied,
+        "applied by simhark",
+      ),
+      Err(error) => publisher.acknowledge(
+        queued.browser_command_id,
+        InterfaceCommandStatus::Rejected,
+        error,
+      ),
+    }
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_simhark_command(
+  command: SimharkCommand,
+  selected_world: &AtomicUsize,
+  selected_worlds: &Mutex<Vec<usize>>,
+  control: &WebControlState,
+  robot_move_requests: &Mutex<HashMap<RobotMoveKey, RobotMoveRequest>>,
+  robot_rotate_requests: &Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>,
+  robot_presence_requests: &Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>,
+  ball_move_requests: &Mutex<HashMap<usize, BallMoveRequest>>,
+) -> std::result::Result<(), String> {
+  match command {
+    SimharkCommand::Start => control.running.store(true, Ordering::Relaxed),
+    SimharkCommand::Pause => control.running.store(false, Ordering::Relaxed),
+    SimharkCommand::Stop | SimharkCommand::CancelSession => {
+      control.stop_requested.store(true, Ordering::Relaxed);
+      control.running.store(false, Ordering::Relaxed);
+    }
+    SimharkCommand::Restart => {
+      control.restart_requested.store(true, Ordering::Relaxed);
+      control.running.store(true, Ordering::Relaxed);
+    }
+    SimharkCommand::Step { frames } => {
+      control
+        .frame_step_requested
+        .fetch_add(frames.clamp(-10_000, 10_000) as isize, Ordering::Relaxed);
+      control.running.store(false, Ordering::Relaxed);
+    }
+    SimharkCommand::Skip { frames } => {
+      control
+        .frame_skip_requested
+        .fetch_add(frames.clamp(-100_000, 100_000) as isize, Ordering::Relaxed);
+    }
+    SimharkCommand::Seek { frame } => {
+      control.frame_seek_requested.store(
+        isize::try_from(frame).unwrap_or(isize::MAX),
+        Ordering::Relaxed,
+      );
+    }
+    SimharkCommand::SetSpeed { multiplier } => {
+      if !multiplier.is_finite() {
+        return Err("speed must be finite".into());
+      }
+      control.speed_percent.store(
+        (multiplier.clamp(0.05, 4.0) * 100.0).round() as usize,
+        Ordering::Relaxed,
+      );
+    }
+    SimharkCommand::SelectWorlds { world_ids } => {
+      let worlds = world_ids
+        .into_iter()
+        .map(|world| world as usize)
+        .collect::<Vec<_>>();
+      if let Some(first) = worlds.first() {
+        selected_world.store(*first, Ordering::Relaxed);
+      }
+      *selected_worlds.lock() = worlds;
+    }
+    SimharkCommand::MoveRobot {
+      world_id,
+      team,
+      id,
+      position,
+    } => {
+      let team = protocol_team_to_simhark(team);
+      let request = RobotMoveRequest {
+        world_id: world_id as usize,
+        team,
+        id: id as usize,
+        x: position.x_mm.0 / 1000.0,
+        y: position.y_mm.0 / 1000.0,
+      };
+      robot_move_requests
+        .lock()
+        .insert((request.world_id, team, request.id), request);
+    }
+    SimharkCommand::RotateRobot {
+      world_id,
+      team,
+      id,
+      orientation_rad,
+    } => {
+      let team = protocol_team_to_simhark(team);
+      let request = RobotRotateRequest {
+        world_id: world_id as usize,
+        team,
+        id: id as usize,
+        orientation: orientation_rad.0,
+      };
+      robot_rotate_requests
+        .lock()
+        .insert((request.world_id, team, request.id), request);
+    }
+    SimharkCommand::SetRobotPresent {
+      world_id,
+      team,
+      id,
+      present,
+    } => {
+      let team = protocol_team_to_simhark(team);
+      let request = RobotPresenceRequest {
+        world_id: world_id as usize,
+        team,
+        id: id as usize,
+        present,
+      };
+      robot_presence_requests
+        .lock()
+        .insert((request.world_id, team, request.id), request);
+    }
+    SimharkCommand::MoveBall { world_id, position } => {
+      ball_move_requests.lock().insert(
+        world_id as usize,
+        BallMoveRequest {
+          world_id: world_id as usize,
+          x: position.x_mm.0 / 1000.0,
+          y: position.y_mm.0 / 1000.0,
+        },
+      );
+    }
+    SimharkCommand::LaunchMatch(_) => {
+      return Err("match launch is handled by match-runner".into());
+    }
+  }
+  Ok(())
+}
+
+fn protocol_team_to_simhark(team: interface_protocol::TeamColor) -> TeamColor {
+  match team {
+    interface_protocol::TeamColor::Blue => TeamColor::Blue,
+    interface_protocol::TeamColor::Yellow => TeamColor::Yellow,
+  }
+}
+
+fn canonical_simhark_snapshot(
+  states: &[WorldState],
+  field: &FieldConfig,
+  properties: std::collections::BTreeMap<String, Value>,
+) -> interface_protocol::SystemSnapshot {
+  let field = interface_protocol::FieldGeometry {
+    field_length_mm: interface_protocol::Millimetres(field.field_length * 1000.0),
+    field_width_mm: interface_protocol::Millimetres(field.field_width * 1000.0),
+    goal_width_mm: interface_protocol::Millimetres(field.goal_width * 1000.0),
+    goal_depth_mm: interface_protocol::Millimetres(field.goal_depth * 1000.0),
+    boundary_width_mm: interface_protocol::Millimetres(
+      field.margin_touch_line.max(field.margin_goal_line) * 1000.0,
+    ),
+    penalty_area_depth_mm: interface_protocol::Millimetres(field.penalty_depth * 1000.0),
+    penalty_area_width_mm: interface_protocol::Millimetres(field.penalty_width * 1000.0),
+    center_circle_radius_mm: interface_protocol::Millimetres(field.field_center_radius * 1000.0),
+    line_thickness_mm: interface_protocol::Millimetres(field.field_line_width * 1000.0),
+    max_robot_radius_mm: interface_protocol::Millimetres(90.0),
+    ball_radius_mm: interface_protocol::Millimetres(21.5),
+  };
+  let worlds = states
+    .iter()
+    .map(|state| {
+      let mut robots = state
+        .blue_robots
+        .iter()
+        .chain(state.yellow_robots.iter())
+        .map(|robot| interface_protocol::RobotState {
+          id: robot.id as u32,
+          team: match robot.team {
+            TeamColor::Blue => interface_protocol::TeamColor::Blue,
+            TeamColor::Yellow => interface_protocol::TeamColor::Yellow,
+          },
+          position: interface_protocol::PointMm {
+            x_mm: interface_protocol::Millimetres(robot.x * 1000.0),
+            y_mm: interface_protocol::Millimetres(robot.y * 1000.0),
+          },
+          orientation_rad: interface_protocol::Radians(robot.orientation),
+          velocity: interface_protocol::VelocityMmPerS {
+            x_mm_per_s: interface_protocol::MillimetresPerSecond(robot.vx * 1000.0),
+            y_mm_per_s: interface_protocol::MillimetresPerSecond(robot.vy * 1000.0),
+            z_mm_per_s: interface_protocol::MillimetresPerSecond(robot.vz * 1000.0),
+          },
+          angular_velocity_rad_per_s: interface_protocol::RadiansPerSecond(robot.v_angular),
+          visible: robot.is_on,
+          visibility: Some(if robot.is_on { 1.0 } else { 0.0 }),
+          infrared: Some(robot.infrared),
+          dribbler_enabled: Some(robot.dribbler_on),
+          task: None,
+        })
+        .collect::<Vec<_>>();
+      robots.sort_by_key(|robot| {
+        (
+          matches!(robot.team, interface_protocol::TeamColor::Yellow),
+          robot.id,
+        )
+      });
+      interface_protocol::WorldState {
+        world_id: state.world_id as u32,
+        frame: state.frame,
+        simulation_time_ns: interface_protocol::TimestampNs(
+          (state.sim_time.max(0.0) * 1_000_000_000.0) as u64,
+        ),
+        field: field.clone(),
+        ball: Some(interface_protocol::BallState {
+          position: interface_protocol::Point3Mm {
+            x_mm: interface_protocol::Millimetres(state.ball.x * 1000.0),
+            y_mm: interface_protocol::Millimetres(state.ball.y * 1000.0),
+            z_mm: interface_protocol::Millimetres(state.ball.z * 1000.0),
+          },
+          velocity: interface_protocol::VelocityMmPerS {
+            x_mm_per_s: interface_protocol::MillimetresPerSecond(state.ball.vx * 1000.0),
+            y_mm_per_s: interface_protocol::MillimetresPerSecond(state.ball.vy * 1000.0),
+            z_mm_per_s: interface_protocol::MillimetresPerSecond(state.ball.vz * 1000.0),
+          },
+          visibility: Some(1.0),
+          source: Some("simhark".into()),
+        }),
+        robots,
+        referee: None,
+        score: interface_protocol::Score {
+          blue: u32::from(state.goal_blue),
+          yellow: u32::from(state.goal_yellow),
+        },
+        events: Vec::new(),
+      }
+    })
+    .collect();
+  interface_protocol::SystemSnapshot {
+    worlds,
+    debug_layers: Vec::new(),
+    debug_items: Vec::new(),
+    properties,
+  }
+}
+
 impl ViewerServer {
   pub fn bind(
     config: ViewerConfig,
     world_count: usize,
     world_config: &WorldConfig,
   ) -> Result<Self> {
-    let http_addr = SocketAddr::new(config.host, config.http_port);
-    let ws_addr = SocketAddr::new(config.host, config.websocket_port());
-
-    let http_server = Server::http(http_addr).map_err(|err| Error::other(err.to_string()))?;
-    let ws_listener = TcpListener::bind(ws_addr)?;
-
     let selected_world = Arc::new(AtomicUsize::new(0));
     let selected_worlds = Arc::new(Mutex::new(vec![0]));
     let latest_frame = Arc::new(Mutex::new(None));
@@ -407,13 +739,33 @@ impl ViewerServer {
     control.running.store(true, Ordering::Relaxed);
     control.speed_percent.store(100, Ordering::Relaxed);
 
-    let http_thread = {
-      let ws_port = config.websocket_port();
-      thread::spawn(move || run_http_server(http_server, ws_port))
-    };
-
-    let ws_thread = {
-      let latest_frame = Arc::clone(&latest_frame);
+    let (interface_host, interface_handle) = InterfaceHost::start(InterfaceConfig {
+      bind_address: SocketAddr::new(config.host, config.http_port),
+      assets: embedded_assets(),
+      ..InterfaceConfig::default()
+    })
+    .map_err(|error| Error::other(error.to_string()))?;
+    let session = interface_handle.create_session(
+      "simhark live",
+      InterfaceSessionKind::Simulation,
+      true,
+      vec!["simhark".into()],
+      world_count as u32,
+    );
+    interface_handle
+      .update_session(session.id, InterfaceSessionLifecycle::Running, None)
+      .map_err(|error| Error::other(error.to_string()))?;
+    let registered = interface_handle
+      .register_system(InterfaceSystemDescriptor {
+        id: "simhark".into(),
+        label: "simhark".into(),
+        kind: InterfaceSystemKind::Simhark,
+        generation: 1,
+        capabilities: simhark_capabilities(),
+      })
+      .map_err(|error| Error::other(error.to_string()))?;
+    let interface_publisher = registered.publisher;
+    let command_thread = {
       let selected_world = Arc::clone(&selected_world);
       let selected_worlds = Arc::clone(&selected_worlds);
       let control_for_ws = Arc::clone(&control);
@@ -422,10 +774,11 @@ impl ViewerServer {
       let robot_presence_requests = Arc::clone(&robot_presence_requests);
       let ball_move_requests = Arc::clone(&ball_move_requests);
       let developer_requests = Arc::clone(&developer_requests);
+      let publisher = interface_publisher.clone();
+      let mut commands = registered.commands;
       thread::spawn(move || {
-        run_websocket_server(
-          ws_listener,
-          latest_frame,
+        run_interface_commands(
+          &mut commands,
           selected_world,
           selected_worlds,
           control_for_ws,
@@ -434,6 +787,7 @@ impl ViewerServer {
           robot_presence_requests,
           ball_move_requests,
           developer_requests,
+          publisher,
         )
       })
     };
@@ -460,8 +814,12 @@ impl ViewerServer {
       robot_rotate_requests,
       robot_presence_requests,
       ball_move_requests,
-      _http_thread: http_thread,
-      _ws_thread: ws_thread,
+      interface_publisher,
+      interface_session: session.id,
+      interface_handle,
+      interface_session_terminal: AtomicBool::new(false),
+      command_thread: Some(command_thread),
+      _interface_host: interface_host,
     })
   }
 
@@ -470,6 +828,36 @@ impl ViewerServer {
   /// [`Self::is_running`] and react to [`Self::take_restart_request`].
   pub fn enable_web_control(&self) {
     self.enable_web_control_with_running(false);
+  }
+
+  pub fn interface_handle(&self) -> webinterface_core::InterfaceHandle {
+    self.interface_handle.clone()
+  }
+
+  pub fn interface_session_id(&self) -> InterfaceSessionId {
+    self.interface_session
+  }
+
+  pub fn start_recording(&self) -> Result<()> {
+    self
+      .interface_handle
+      .start_recording(self.interface_session)
+      .map_err(|error| Error::other(error.to_string()))
+  }
+
+  pub fn finish_session(
+    &self,
+    lifecycle: InterfaceSessionLifecycle,
+    error: Option<String>,
+  ) -> Result<()> {
+    self
+      .interface_handle
+      .update_session(self.interface_session, lifecycle, error)
+      .map_err(|error| Error::other(error.to_string()))?;
+    self
+      .interface_session_terminal
+      .store(true, Ordering::Relaxed);
+    Ok(())
   }
 
   /// Opt in to web-driven playback control without stopping an already
@@ -851,6 +1239,37 @@ impl ViewerServer {
     if let Ok(json) = serde_json::to_string(&frame) {
       *self.latest_frame.lock() = Some(json);
     }
+    let mut properties = std::collections::BTreeMap::new();
+    properties.insert(
+      "selected_world".into(),
+      serde_json::json!(self.selected_world()),
+    );
+    properties.insert(
+      "selected_worlds".into(),
+      serde_json::json!(self.selected_worlds()),
+    );
+    properties.insert(
+      "control.running".into(),
+      serde_json::json!(self.is_running()),
+    );
+    properties.insert("control.speed".into(), serde_json::json!(self.speed()));
+    properties.insert(
+      "test_suite".into(),
+      frame.test_suite.clone().unwrap_or(Value::Null),
+    );
+    properties.insert(
+      "developer".into(),
+      serde_json::to_value(&frame.developer).unwrap_or(Value::Null),
+    );
+    #[cfg(feature = "viewer-debug")]
+    properties.insert(
+      "debug".into(),
+      serde_json::to_value(&frame.debug).unwrap_or(Value::Null),
+    );
+    let _ = self.interface_publisher.publish(
+      self.interface_session,
+      canonical_simhark_snapshot(states, &self.field, properties),
+    );
   }
 
   pub fn publish_replay_frame(
@@ -931,11 +1350,52 @@ impl ViewerServer {
     if let Ok(json) = serde_json::to_string(&frame) {
       *self.latest_frame.lock() = Some(json);
     }
+    let mut properties = std::collections::BTreeMap::new();
+    properties.insert("replay.enabled".into(), Value::Bool(true));
+    properties.insert("replay.frame_index".into(), serde_json::json!(frame_index));
+    properties.insert("replay.frame_count".into(), serde_json::json!(frame_count));
+    properties.insert("replay.base_speed".into(), serde_json::json!(base_speed));
+    properties.insert(
+      "replay.events".into(),
+      serde_json::to_value(timeline).unwrap_or(Value::Null),
+    );
+    properties.insert(
+      "replay.robot_inputs".into(),
+      serde_json::to_value(&frame.robot_inputs).unwrap_or(Value::Null),
+    );
+    #[cfg(feature = "viewer-debug")]
+    properties.insert(
+      "debug".into(),
+      serde_json::to_value(&frame.debug).unwrap_or(Value::Null),
+    );
+    let _ = self.interface_publisher.publish(
+      self.interface_session,
+      canonical_simhark_snapshot(&replay_frame.states, &self.field, properties),
+    );
   }
 
   /// Reset the accumulated goal counters (useful when restarting a match).
   pub fn reset_goals(&self) {
     *self.goal_tracker.lock() = GoalTracker::default();
+  }
+}
+
+impl Drop for ViewerServer {
+  fn drop(&mut self) {
+    if !self
+      .interface_session_terminal
+      .swap(true, Ordering::Relaxed)
+    {
+      let _ = self.interface_handle.update_session(
+        self.interface_session,
+        InterfaceSessionLifecycle::Cancelled,
+        Some("viewer host stopped before the session was finalized".into()),
+      );
+    }
+    self.interface_handle.unregister_system("simhark");
+    if let Some(thread) = self.command_thread.take() {
+      let _ = thread.join();
+    }
   }
 }
 
@@ -1024,6 +1484,7 @@ impl From<&ReplayDebugOverlay> for DebugOverlay {
   }
 }
 
+#[cfg(any())]
 fn run_http_server(server: Server, ws_port: u16) {
   let html_type = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).ok();
 
@@ -1179,6 +1640,7 @@ fn field_boundary_intersection(
     })
 }
 
+#[cfg(any())]
 fn run_websocket_server(
   listener: TcpListener,
   latest_frame: Arc<Mutex<Option<String>>>,
@@ -1272,6 +1734,7 @@ fn run_websocket_server(
   }
 }
 
+#[cfg(any())]
 fn handle_client_message(
   message: &str,
   selected_world: &AtomicUsize,
@@ -1410,6 +1873,7 @@ fn handle_client_message(
   }
 }
 
+#[cfg(any())]
 fn parse_robot_move_request(message: &str) -> Option<RobotMoveRequest> {
   let value = message.strip_prefix("robot:move:")?;
   let mut parts = value.split(':');
@@ -1434,6 +1898,7 @@ fn parse_robot_move_request(message: &str) -> Option<RobotMoveRequest> {
   })
 }
 
+#[cfg(any())]
 fn parse_robot_rotate_request(message: &str) -> Option<RobotRotateRequest> {
   let value = message.strip_prefix("robot:rotate:")?;
   let mut parts = value.split(':');
@@ -1456,6 +1921,7 @@ fn parse_robot_rotate_request(message: &str) -> Option<RobotRotateRequest> {
   })
 }
 
+#[cfg(any())]
 fn parse_robot_presence_request(message: &str) -> Option<RobotPresenceRequest> {
   let value = message.strip_prefix("robot:presence:")?;
   let mut parts = value.split(':');
@@ -1482,6 +1948,7 @@ fn parse_robot_presence_request(message: &str) -> Option<RobotPresenceRequest> {
   })
 }
 
+#[cfg(any())]
 fn parse_ball_move_request(message: &str) -> Option<BallMoveRequest> {
   let value = message.strip_prefix("ball:move:")?;
   let mut parts = value.split(':');
@@ -1494,6 +1961,7 @@ fn parse_ball_move_request(message: &str) -> Option<BallMoveRequest> {
   Some(BallMoveRequest { world_id, x, y })
 }
 
+#[cfg(any())]
 fn parse_world_selection(value: &str) -> Vec<usize> {
   let value = value.trim();
   if value.eq_ignore_ascii_case("all") {
@@ -1538,8 +2006,12 @@ fn state_by_world_id(states: &[WorldState], selected_world: usize) -> Option<&Wo
   states.iter().find(|state| state.world_id == selected_world)
 }
 
-const FRONTEND_HTML: &str = include_str!("../frontend/dist/index.html");
+// The v4 server is hosted by `webinterface-core`. This fallback only keeps
+// legacy helper code source-compatible while downstream callers migrate.
+#[cfg(any())]
+const FRONTEND_HTML: &str = "<!doctype html><html><body><div id=\"root\"></div></body></html>";
 
+#[cfg(any())]
 fn render_index(ws_port: u16) -> String {
   let injected = format!("<script>window.__SIMHARK_WS_PORT__={ws_port};</script>");
   if let Some((head, tail)) = FRONTEND_HTML.split_once("</head>") {
@@ -1550,7 +2022,7 @@ fn render_index(ws_port: u16) -> String {
   }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
   use super::{
     BallMoveRequest, DeveloperRequest, RobotMoveRequest, RobotPresenceRequest, RobotRotateRequest,

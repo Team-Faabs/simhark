@@ -13,7 +13,7 @@ pub mod referris_autoref;
 pub mod sumatra_match;
 
 #[cfg(feature = "viewer")]
-use controller::hot_swappable_team_kinds;
+use controller::{Controller, hot_swappable_team_kinds};
 use controller::{TeamKind, build_controller};
 use director::MatchDirector;
 use evaluator::{Evaluator, MatchReport};
@@ -42,6 +42,8 @@ pub struct MatchConfig {
   pub seed: u64,
   pub log: Option<String>,
   pub replay: Option<String>,
+  /// Record canonical interface state/events to `.faabsrec`.
+  pub interface_recording: bool,
   pub log_every: u64,
   pub quiet: bool,
   /// Open the live web viewer (requires the `viewer` build feature).
@@ -72,6 +74,7 @@ impl Default for MatchConfig {
       seed: 1,
       log: None,
       replay: None,
+      interface_recording: false,
       log_every: 2,
       quiet: false,
       viewer: false,
@@ -209,11 +212,16 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   };
 
   #[cfg(feature = "viewer")]
-  let viewer = if (mc.viewer || mc.dev) && mc.replay.is_none() {
+  let viewer = if (mc.viewer || mc.dev) && (mc.replay.is_none() || mc.interface_recording) {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
         v.enable_web_control_running();
+        if mc.interface_recording
+          && let Err(error) = v.start_recording()
+        {
+          eprintln!("failed to start interface recording: {error}");
+        }
         configure_developer_console(
           &v,
           mc.dev,
@@ -237,6 +245,10 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     None
   };
   let pace = mc.replay.is_none() && (mc.realtime || mc.viewer || mc.dev);
+  #[cfg(feature = "viewer")]
+  if let Some(viewer) = &viewer {
+    attach_controller_interfaces(viewer, &mut blue_ctrl, &mut yellow_ctrl);
+  }
 
   let kickoff = director.kickoff_reset();
   let mut state = engine
@@ -251,10 +263,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   }
 
   let mut command_counter: u32 = 1;
+  #[cfg(feature = "viewer")]
+  let mut cancelled_by_operator = false;
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
       if v.take_stop_request() {
+        cancelled_by_operator = true;
         break;
       }
       if v.take_restart_request() {
@@ -285,6 +300,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
           yellow_ctrl.as_deref(),
           director.teleport_ball_on_no_progress(),
         );
+        attach_controller_interfaces(v, &mut blue_ctrl, &mut yellow_ctrl);
       }
       apply_developer_requests(
         v,
@@ -444,7 +460,39 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   if let (Some(path), Some(replay)) = (&mc.replay, replay) {
     write_replay(path, replay.finish());
   }
+
+  #[cfg(feature = "viewer")]
+  if let Some(viewer) = &viewer {
+    let lifecycle = if cancelled_by_operator {
+      webinterface_protocol::SessionLifecycle::Cancelled
+    } else {
+      webinterface_protocol::SessionLifecycle::Completed
+    };
+    if let Err(error) = viewer.finish_session(lifecycle, None) {
+      eprintln!("failed to finalize interface session: {error}");
+    }
+  }
   evaluator.finish(state.sim_time)
+}
+
+#[cfg(feature = "viewer")]
+fn attach_controller_interfaces(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: &mut Option<Box<dyn Controller>>,
+  yellow: &mut Option<Box<dyn Controller>>,
+) {
+  let handle = viewer.interface_handle();
+  let session_id = viewer.interface_session_id();
+  if let Some(controller) = blue.as_deref_mut()
+    && let Err(error) = controller.attach_interface(&handle, session_id)
+  {
+    eprintln!("failed to attach blue controller to shared interface: {error}");
+  }
+  if let Some(controller) = yellow.as_deref_mut()
+    && let Err(error) = controller.attach_interface(&handle, session_id)
+  {
+    eprintln!("failed to attach yellow controller to shared interface: {error}");
+  }
 }
 
 #[cfg(feature = "viewer")]
