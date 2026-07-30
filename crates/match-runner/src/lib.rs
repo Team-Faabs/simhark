@@ -248,6 +248,12 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   #[cfg(feature = "viewer")]
   if let Some(viewer) = &viewer {
     attach_controller_interfaces(viewer, &mut blue_ctrl, &mut yellow_ctrl);
+    #[cfg(feature = "referris")]
+    if let Err(error) =
+      referris.attach_interface(&viewer.interface_handle(), viewer.interface_session_id())
+    {
+      eprintln!("failed to attach Referris interface: {error}");
+    }
   }
 
   let kickoff = director.kickoff_reset();
@@ -284,7 +290,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         evaluator = Evaluator::new(cfg.clone(), blue_name.clone(), yellow_name.clone());
         #[cfg(feature = "referris")]
         {
+          v.interface_handle().unregister_system("referris");
           referris = referris_autoref::ReferrisAutoref::new();
+          if let Err(error) =
+            referris.attach_interface(&v.interface_handle(), v.interface_session_id())
+          {
+            eprintln!("failed to reattach Referris interface: {error}");
+          }
         }
         pickup_validator = PickupValidator::default();
         command_counter = 1;

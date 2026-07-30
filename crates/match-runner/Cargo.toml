@@ -23,9 +23,9 @@ prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-webinterface-assets = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "e1df0dad5177b37451ad987914e740ad16c93661" }
-webinterface-core = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "e1df0dad5177b37451ad987914e740ad16c93661" }
-webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "e1df0dad5177b37451ad987914e740ad16c93661" }
+webinterface-assets = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f" }
+webinterface-core = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f" }
+webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f" }
 
 bangka = { path = "../../../bangka/bangka", optional = true }
 bongka = { path = "../../../bangka/bongka", optional = true }
@@ -53,5 +53,5 @@ viewer = ["simhark/viewer", "simhark_faabs?/viewer"]
 viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs?/viewer-debug"]
 sim-time = ["faabs", "simhark_faabs/sim-time"]
 sumatra = ["dep:simhark-sumatra"]
-referris = ["dep:referris"]
+referris = ["dep:referris", "referris/webinterface"]
 validator = ["referris"]
