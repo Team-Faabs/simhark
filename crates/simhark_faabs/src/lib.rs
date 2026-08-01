@@ -51,11 +51,24 @@ impl<A: Ai + Default + Send> Faabs<A> {
   pub fn with_interface(num_robots: u8, team: TeamColor) -> Self {
     let faabs = Self::new(num_robots, team);
 
+    faabs.start_interface();
+
+    faabs
+  }
+
+
+  pub fn new(num_robots: u8, team: TeamColor) -> Self {
+    Self::with_ai(num_robots, team, A::default())
+  }
+}
+
+impl<A: Ai> Faabs<A> {
+  fn start_interface(&self) {
     #[cfg(feature = "interface")]
     {
-      let cfg = get_config(num_robots);
-      let tx = faabs.interface.clone();
-      let ws_out = faabs.ws_out.clone();
+      let cfg = get_config(self.robots.len() as u8);
+      let tx = self.interface.clone();
+      let ws_out = self.ws_out.clone();
 
       crashpilot::interface::spawn_interface();
 
@@ -63,12 +76,6 @@ impl<A: Ai + Default + Send> Faabs<A> {
         crate::interface::spawn_websocket(&cfg, tx, ws_out).await;
       });
     }
-
-    faabs
-  }
-
-  pub fn new(num_robots: u8, team: TeamColor) -> Self {
-    Self::with_ai(num_robots, team, A::default())
   }
 }
 
@@ -96,7 +103,7 @@ impl<A: Ai + Send> Faabs<A> {
     #[cfg(not(feature = "ssl_game_controller"))]
     let comm = ();
 
-    Self {
+    let this = Self {
       robots,
       crash_pilot: CrashPilot::from_parts(
         cp_config,
@@ -118,7 +125,11 @@ impl<A: Ai + Send> Faabs<A> {
       interface: EventShare::default(),
       #[cfg(feature = "interface")]
       ws_out: crashpilot::communication::WebsocketOut::new(),
-    }
+    };
+
+    this.start_interface();
+
+    this
   }
 
   pub fn step(
