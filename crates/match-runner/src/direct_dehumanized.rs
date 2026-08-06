@@ -286,29 +286,34 @@ fn command_to_sim(
 ) -> SimRobotCommand {
   let (vx, vy, angular) = match command.pos {
     Some(pos) => {
-      let dx = pos.pos.x as f64 / MM_PER_M - robot.x;
-      let dy = pos.pos.y as f64 / MM_PER_M - robot.y;
-      let distance = dx.hypot(dy);
-      let configured_speed = pos.speed.map(f64::from).unwrap_or(DEFAULT_SPEED_MM_S);
-      let stop_limit = if stop {
-        dehumanized::MAX_STOP_VELOCITY as f64
-      } else {
-        f64::INFINITY
-      };
-      let max_speed_m_s = configured_speed
-        .min(stop_limit)
-        .min(cfg.vel_absolute_max * MM_PER_M)
-        / MM_PER_M;
-      let speed = if distance <= POSITION_TOLERANCE_M {
-        0.0
-      } else {
-        (distance * POSITION_GAIN_PER_S).min(max_speed_m_s)
-      };
-      let (vx, vy) = if distance > 0.0 {
-        (dx / distance * speed, dy / distance * speed)
+      let (vx, vy) = if let Some(p) = pos.pos {
+        let dx = p.x as f64 / MM_PER_M - robot.x;
+        let dy = p.y as f64 / MM_PER_M - robot.y;
+        let distance = dx.hypot(dy);
+        let configured_speed = pos.speed.map(f64::from).unwrap_or(DEFAULT_SPEED_MM_S);
+        let stop_limit = if stop {
+          dehumanized::MAX_STOP_VELOCITY as f64
+        } else {
+          f64::INFINITY
+        };
+        let max_speed_m_s = configured_speed
+            .min(stop_limit)
+            .min(cfg.vel_absolute_max * MM_PER_M)
+            / MM_PER_M;
+        let speed = if distance <= POSITION_TOLERANCE_M {
+          0.0
+        } else {
+          (distance * POSITION_GAIN_PER_S).min(max_speed_m_s)
+        };
+        if distance > 0.0 {
+          (dx / distance * speed, dy / distance * speed)
+        } else {
+          (0.0, 0.0)
+        }
       } else {
         (0.0, 0.0)
       };
+
       let angular = pos
         .face
         .map(|face| {
@@ -330,13 +335,19 @@ fn command_to_sim(
     ),
   };
 
-  SimRobotCommand {
+  let x = SimRobotCommand {
     id,
     move_command: Some(MoveCommand::GlobalVelocity { vx, vy, angular }),
     kick_speed,
     kick_angle,
     dribbler_on: command.dribbler,
+  };
+
+  if id == 0 {
+    dbg!(&x);
   }
+
+  x
 }
 
 fn flat_kick_speed(distance_mm: f32, max_speed: f64) -> f64 {
