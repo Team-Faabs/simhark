@@ -47,32 +47,40 @@ pub struct Faabs<A: Ai = DummyAi> {
   pub interface: EventShare,
   #[cfg(feature = "interface")]
   pub ws_out: crashpilot::communication::WebsocketOut,
+  #[cfg(feature = "interface")]
+  interface_thread: Option<std::thread::JoinHandle<()>>,
   #[cfg(feature = "viewer")]
   shared_interface: Option<webinterface_crashpilot_bridge::CrashPilotAdapter>,
 }
 
 impl<A: Ai + Default + Send> Faabs<A> {
   pub fn with_interface(num_robots: u8, team: TeamColor) -> Self {
-    let faabs = Self::new(num_robots, team);
+    Self::new(num_robots, team)
+  }
 
+  pub fn new(num_robots: u8, team: TeamColor) -> Self {
+    Self::with_ai(num_robots, team, A::default())
+  }
+}
+
+impl<A: Ai> Faabs<A> {
+  fn start_interface(&mut self) {
     #[cfg(feature = "interface")]
     {
-      let cfg = get_config(num_robots);
-      let tx = faabs.interface.clone();
-      let ws_out = faabs.ws_out.clone();
+      let cfg = get_config(self.robots.len() as u8);
+      let tx = self.interface.clone();
+      let ws_out = self.ws_out.clone();
+      let websocket_url = format!("ws://127.0.0.1:{}/ws", cfg.server.websocket_port);
 
-      crashpilot::interface::spawn_interface();
+      self.interface_thread = Some(
+        crashpilot::interface::spawn_interface(websocket_url)
+          .expect("failed to start Rust CrashPilot interface owner"),
+      );
 
       tokio::spawn(async move {
         crate::interface::spawn_websocket(&cfg, tx, ws_out).await;
       });
     }
-
-    faabs
-  }
-
-  pub fn new(num_robots: u8, team: TeamColor) -> Self {
-    Self::with_ai(num_robots, team, A::default())
   }
 }
 
@@ -100,7 +108,7 @@ impl<A: Ai + Send> Faabs<A> {
     #[cfg(not(feature = "ssl_game_controller"))]
     let comm = ();
 
-    Self {
+    let mut this = Self {
       robots,
       crash_pilot: CrashPilot::from_parts(
         cp_config,
@@ -122,9 +130,15 @@ impl<A: Ai + Send> Faabs<A> {
       interface: EventShare::default(),
       #[cfg(feature = "interface")]
       ws_out: crashpilot::communication::WebsocketOut::new(),
+      #[cfg(feature = "interface")]
+      interface_thread: None,
       #[cfg(feature = "viewer")]
       shared_interface: None,
-    }
+    };
+
+    this.start_interface();
+
+    this
   }
 
   #[cfg(feature = "viewer")]

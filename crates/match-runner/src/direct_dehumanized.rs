@@ -493,6 +493,7 @@ fn command_to_sim(
         }
         None => (0.0, 0.0),
       };
+
       let angular = pos
         .face
         .map(|face| {
@@ -514,13 +515,19 @@ fn command_to_sim(
     ),
   };
 
-  SimRobotCommand {
+  let x = SimRobotCommand {
     id,
     move_command: Some(MoveCommand::GlobalVelocity { vx, vy, angular }),
     kick_speed,
     kick_angle,
     dribbler_on: command.dribbler,
+  };
+
+  if id == 0 {
+    dbg!(&x);
   }
+
+  x
 }
 
 fn flat_kick_speed(distance_mm: f32, max_speed: f64) -> f64 {
