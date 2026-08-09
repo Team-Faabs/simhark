@@ -321,6 +321,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         &mut yellow_ctrl,
         bots,
         &mut director,
+        &state,
       );
       if mc.dev {
         let current_blue_name = format!(
@@ -445,6 +446,17 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         blue_name: Some(published_blue_name),
         yellow_name: Some(published_yellow_name),
       });
+      // Without Referris the match director is the referee, and it is the only
+      // thing that knows the current phase. Publishing it keeps the Referee
+      // panel honest instead of permanently empty.
+      #[cfg(not(feature = "referris"))]
+      v.set_game_state(simhark::viewer::GameStateInfo {
+        command: director_command_label(&director).to_string(),
+        command_counter,
+        stage: None,
+        blue_name: Some(blue_name.clone()),
+        yellow_name: Some(yellow_name.clone()),
+      });
       #[cfg(feature = "viewer-debug")]
       publish_controller_debug(
         v,
@@ -504,6 +516,19 @@ fn attach_controller_interfaces(
     && let Err(error) = controller.attach_interface(&handle, session_id)
   {
     eprintln!("failed to attach yellow controller to shared interface: {error}");
+  }
+}
+
+/// The director's phase as an SSL-style command label.
+///
+/// simhark has no game controller, so this is the closest honest description
+/// of what the match is doing when Referris is not compiled in.
+#[cfg(all(feature = "viewer", not(feature = "referris")))]
+fn director_command_label(director: &MatchDirector) -> &'static str {
+  match director.referee_command_code() {
+    4 => "PREPARE_KICKOFF_YELLOW",
+    5 => "PREPARE_KICKOFF_BLUE",
+    _ => "FORCE_START",
   }
 }
 
@@ -589,6 +614,7 @@ fn configure_developer_console(
 }
 
 #[cfg(feature = "viewer")]
+#[allow(clippy::too_many_arguments)]
 fn apply_developer_requests(
   viewer: &simhark::viewer::ViewerServer,
   dev: bool,
@@ -596,6 +622,7 @@ fn apply_developer_requests(
   yellow: &mut Option<Box<dyn controller::Controller>>,
   bots: TeamBotCounts,
   director: &mut MatchDirector,
+  state: &simhark::WorldState,
 ) {
   let requests = viewer.take_developer_requests();
   let controls_changed = !requests.is_empty();
@@ -612,24 +639,31 @@ fn apply_developer_requests(
           if *enabled { "enabled" } else { "disabled" }
         ))
       }
-      simhark::viewer::DeveloperRequest::Activate { .. }
+      simhark::viewer::DeveloperRequest::Load { .. }
+      | simhark::viewer::DeveloperRequest::Start { .. }
+      | simhark::viewer::DeveloperRequest::Stop { .. }
       | simhark::viewer::DeveloperRequest::Disable { .. } => {
-        let controller = match target.as_str() {
-          "blue" => blue.as_deref_mut(),
-          "yellow" => yellow.as_deref_mut(),
-          _ => None,
+        let (controller, color) = match target.as_str() {
+          "blue" => (blue.as_deref_mut(), TeamColor::Blue),
+          "yellow" => (yellow.as_deref_mut(), TeamColor::Yellow),
+          _ => (None, TeamColor::Blue),
         };
+        let gc = director.command_for(color);
         controller
           .ok_or_else(|| format!("no controller is available for target {target}"))
-          .and_then(|controller| controller.apply_developer_request(&request))
+          .and_then(|controller| {
+            controller.apply_developer_request(&request, state, color, gc)
+          })
       }
       _ => Err("request is not available in this match mode".to_string()),
     };
     let entry = match &request {
-      simhark::viewer::DeveloperRequest::Activate { entry, .. } => Some(entry.clone()),
+      simhark::viewer::DeveloperRequest::Load { entry, .. } => Some(entry.clone()),
       simhark::viewer::DeveloperRequest::SwitchAi { ai, .. } => Some(ai.clone()),
-      simhark::viewer::DeveloperRequest::Disable { .. } => None,
-      simhark::viewer::DeveloperRequest::SetBallRecovery { .. } => None,
+      simhark::viewer::DeveloperRequest::Start { .. }
+      | simhark::viewer::DeveloperRequest::Stop { .. }
+      | simhark::viewer::DeveloperRequest::Disable { .. }
+      | simhark::viewer::DeveloperRequest::SetBallRecovery { .. } => None,
     };
     viewer.set_developer_result(simhark::viewer::DeveloperResult {
       target,
@@ -646,6 +680,54 @@ fn apply_developer_requests(
       yellow.as_deref(),
       director.teleport_ball_on_no_progress(),
     );
+  }
+  publish_developer_runs(viewer, blue.as_deref(), yellow.as_deref(), state.frame);
+}
+
+/// Mirrors each controller's AI Lab lifecycle into the viewer snapshot.
+///
+/// Run state changes on its own — an entry finishes or fails mid-tick without
+/// any operator request — so this runs every iteration and republishes only
+/// what actually changed.
+#[cfg(feature = "viewer")]
+fn publish_developer_runs(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: Option<&dyn controller::Controller>,
+  yellow: Option<&dyn controller::Controller>,
+  frame: u64,
+) {
+  for (target, controller) in [("blue", blue), ("yellow", yellow)] {
+    let Some(mut run) = controller.and_then(controller::Controller::developer_run) else {
+      continue;
+    };
+    run.target = target.to_string();
+
+    let previous = viewer.developer_run(target);
+    if previous
+      .as_ref()
+      .is_some_and(|previous| previous.state == run.state && previous.entry == run.entry)
+    {
+      continue;
+    }
+
+    // Carry the original start frame across state changes so the timeline can
+    // show how long a run took.
+    run.started_frame = match run.state {
+      webinterface_protocol::DeveloperRunState::Running => previous
+        .as_ref()
+        .and_then(|previous| previous.started_frame)
+        .or(Some(frame)),
+      webinterface_protocol::DeveloperRunState::Idle
+      | webinterface_protocol::DeveloperRunState::Loaded => None,
+      _ => previous.as_ref().and_then(|previous| previous.started_frame),
+    };
+    run.finished_frame = match run.state {
+      webinterface_protocol::DeveloperRunState::Finished
+      | webinterface_protocol::DeveloperRunState::Stopped
+      | webinterface_protocol::DeveloperRunState::Failed => Some(frame),
+      _ => None,
+    };
+    viewer.set_developer_run(run);
   }
 }
 

@@ -45,10 +45,23 @@ pub trait Controller {
   fn developer_schema(&self) -> Option<serde_json::Value> {
     None
   }
+  /// Current AI Lab lifecycle, for controllers that can run registry entries.
+  /// The `target` field is filled in by the match runner, which owns the
+  /// mapping from side to target id.
+  #[cfg(feature = "viewer")]
+  fn developer_run(&self) -> Option<simhark::viewer::DeveloperRun> {
+    None
+  }
+  /// Applies one AI Lab action. `world`, `color` and `gc` describe the tick the
+  /// request is being applied on: starting an entry instantiates it against the
+  /// current world, so it cannot be handled without one.
   #[cfg(feature = "viewer")]
   fn apply_developer_request(
     &mut self,
     _request: &simhark::viewer::DeveloperRequest,
+    _world: &WorldState,
+    _color: TeamColor,
+    _gc: GameCommand,
   ) -> Result<String, String> {
     Err("this controller does not expose developer actions".to_string())
   }

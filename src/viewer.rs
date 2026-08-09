@@ -83,6 +83,10 @@ pub struct GameStateInfo {
 pub struct DeveloperSnapshot {
   pub schema: Value,
   pub results: HashMap<String, DeveloperResult>,
+  /// Lifecycle of every target that has one, keyed by target id. This is what
+  /// lets the AI Lab show whether an entry is merely loaded or actually
+  /// running, instead of inferring it from the last acknowledgement.
+  pub runs: HashMap<String, DeveloperRun>,
 }
 
 /// Latest direct-invocation result for one developer target.
@@ -94,16 +98,39 @@ pub struct DeveloperResult {
   pub message: String,
 }
 
+/// Lifecycle of one AI Lab target.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DeveloperRun {
+  pub target: String,
+  pub kind: Option<String>,
+  pub entry: Option<String>,
+  pub state: interface_protocol::DeveloperRunState,
+  pub message: String,
+  /// Simulation frame the run was started on, for correlating with the
+  /// timeline. `None` until something is started.
+  pub started_frame: Option<u64>,
+  pub finished_frame: Option<u64>,
+}
+
 /// A schema-renderer action sent from the frontend to the simulation binding.
+///
+/// Loading and starting are separate actions on purpose: registry entries keep
+/// state once instantiated, so editing a parameter must not restart a run.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DeveloperRequest {
-  Activate {
+  Load {
     target: String,
     kind: String,
     entry: String,
     config: Value,
     params: Value,
+  },
+  Start {
+    target: String,
+  },
+  Stop {
+    target: String,
   },
   Disable {
     target: String,
@@ -121,7 +148,9 @@ pub enum DeveloperRequest {
 impl DeveloperRequest {
   pub fn target(&self) -> &str {
     match self {
-      Self::Activate { target, .. }
+      Self::Load { target, .. }
+      | Self::Start { target }
+      | Self::Stop { target }
       | Self::Disable { target }
       | Self::SwitchAi { target, .. }
       | Self::SetBallRecovery { target, .. } => target,
@@ -348,7 +377,7 @@ pub struct ViewerServer {
   game_state: Arc<Mutex<GameStateTracker>>,
   test_suite: Arc<Mutex<Option<Value>>>,
   developer: Arc<Mutex<Option<DeveloperSnapshot>>>,
-  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
+  developer_requests: Arc<Mutex<Vec<DeveloperRequest>>>,
   goal_tracker: Arc<Mutex<GoalTracker>>,
   #[cfg(feature = "viewer-debug")]
   debug: Arc<Mutex<HashMap<usize, ViewerDebugSnapshot>>>,
@@ -420,7 +449,7 @@ fn run_interface_commands(
   robot_rotate_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>>,
   robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
   ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
-  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
+  developer_requests: Arc<Mutex<Vec<DeveloperRequest>>>,
   publisher: SystemPublisher,
 ) {
   while let Some(queued) = commands.blocking_recv() {
@@ -437,19 +466,25 @@ fn run_interface_commands(
       ),
       SystemCommand::Developer(command) => {
         let request = match command {
-          interface_protocol::DeveloperCommand::Activate {
+          interface_protocol::DeveloperCommand::Load {
             target,
             kind,
             entry,
             config,
             params,
-          } => DeveloperRequest::Activate {
+          } => DeveloperRequest::Load {
             target,
             kind,
             entry,
             config,
             params,
           },
+          interface_protocol::DeveloperCommand::Start { target } => {
+            DeveloperRequest::Start { target }
+          }
+          interface_protocol::DeveloperCommand::Stop { target } => {
+            DeveloperRequest::Stop { target }
+          }
           interface_protocol::DeveloperCommand::Disable { target } => {
             DeveloperRequest::Disable { target }
           }
@@ -460,10 +495,7 @@ fn run_interface_commands(
             DeveloperRequest::SetBallRecovery { target, enabled }
           }
         };
-        developer_requests
-          .lock()
-          .insert(request.target().to_owned(), request);
-        Ok(())
+        queue_developer_request(&developer_requests, request)
       }
       _ => Err("unsupported command for simhark".to_string()),
     };
@@ -480,6 +512,25 @@ fn run_interface_commands(
       ),
     }
   }
+}
+
+/// Number of developer requests kept before new ones are refused.
+///
+/// The simulation loop drains this queue every iteration, including while
+/// paused, so it only fills up if the loop is wedged. Refusing loudly beats
+/// growing without bound or dropping the operator's `start`.
+const DEVELOPER_REQUEST_QUEUE_LIMIT: usize = 64;
+
+fn queue_developer_request(
+  queue: &Mutex<Vec<DeveloperRequest>>,
+  request: DeveloperRequest,
+) -> std::result::Result<(), String> {
+  let mut queue = queue.lock();
+  if queue.len() >= DEVELOPER_REQUEST_QUEUE_LIMIT {
+    return Err("the simulation is not draining developer requests".into());
+  }
+  queue.push(request);
+  Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,11 +667,49 @@ fn protocol_team_to_simhark(team: interface_protocol::TeamColor) -> TeamColor {
   }
 }
 
+/// Referee state as the canonical protocol wants it.
+///
+/// simhark has no game controller of its own — whatever drives the match
+/// (referris, the SSL GC, the sumatra default referee) pushes a
+/// [`GameStateInfo`] in, and this is the one place that becomes protocol.
+fn canonical_referee(
+  game_state: Option<&PublishedGameState<'_>>,
+  score: interface_protocol::Score,
+) -> Option<interface_protocol::RefereeState> {
+  let game_state = game_state?;
+  Some(interface_protocol::RefereeState {
+    stage: game_state.stage.map(str::to_string),
+    command: game_state.command.to_string(),
+    next_command: None,
+    command_counter: game_state.command_counter,
+    stage_time_left_ns: None,
+    action_time_remaining_ns: None,
+    designated_position: None,
+    blue_team_on_positive_half: None,
+    score,
+  })
+}
+
+/// Builds the canonical snapshot for one publish.
+///
+/// `score` is the accumulated match score: `WorldState::goal_blue` is a
+/// one-frame "a goal is happening right now" flag, not a running score, so it
+/// cannot stand in for one.
 fn canonical_simhark_snapshot(
   states: &[WorldState],
   field: &FieldConfig,
   properties: std::collections::BTreeMap<String, Value>,
+  score: interface_protocol::Score,
+  referee: Option<interface_protocol::RefereeState>,
+  #[cfg(feature = "viewer-debug")] debug: &HashMap<usize, ViewerDebugSnapshot>,
 ) -> interface_protocol::SystemSnapshot {
+  #[cfg(feature = "viewer-debug")]
+  let debug_items = canonical_debug_items(debug, states, field);
+  #[cfg(feature = "viewer-debug")]
+  let debug_layers = simhark_debug_layers();
+  #[cfg(not(feature = "viewer-debug"))]
+  let (debug_items, debug_layers) = (Vec::new(), Vec::new());
+
   let field = interface_protocol::FieldGeometry {
     field_length_mm: interface_protocol::Millimetres(field.field_length * 1000.0),
     field_width_mm: interface_protocol::Millimetres(field.field_width * 1000.0),
@@ -664,6 +753,19 @@ fn canonical_simhark_snapshot(
           visibility: Some(if robot.is_on { 1.0 } else { 0.0 }),
           infrared: Some(robot.infrared),
           dribbler_enabled: Some(robot.dribbler_on),
+          // The controller's own label for what this robot is doing, so the
+          // task table reads the same as the field overlay.
+          #[cfg(feature = "viewer-debug")]
+          task: debug
+            .get(&state.world_id)
+            .and_then(|snapshot| {
+              snapshot
+                .robots
+                .iter()
+                .find(|info| info.team == robot.team && info.id == robot.id)
+            })
+            .map(|info| info.task.clone()),
+          #[cfg(not(feature = "viewer-debug"))]
           task: None,
         })
         .collect::<Vec<_>>();
@@ -695,21 +797,214 @@ fn canonical_simhark_snapshot(
           source: Some("simhark".into()),
         }),
         robots,
-        referee: None,
-        score: interface_protocol::Score {
-          blue: u32::from(state.goal_blue),
-          yellow: u32::from(state.goal_yellow),
-        },
+        referee: referee.clone(),
+        score: score.clone(),
         events: Vec::new(),
       }
     })
     .collect();
   interface_protocol::SystemSnapshot {
     worlds,
-    debug_layers: Vec::new(),
-    debug_items: Vec::new(),
+    debug_layers,
+    debug_items,
     properties,
   }
+}
+
+/// The stable layer tree the strategy overlays hang off.
+///
+/// Layer ids never change with content, which is what lets the Layers panel
+/// keep a visibility or solo choice across frames and across restarts. Team
+/// leaves exist so a whole side can be hidden — the plan's team filter.
+#[cfg(feature = "viewer-debug")]
+fn simhark_debug_layers() -> Vec<interface_protocol::DebugLayer> {
+  fn layer(id: &str, parent: Option<&str>, label: &str) -> interface_protocol::DebugLayer {
+    interface_protocol::DebugLayer {
+      id: id.to_string(),
+      parent_id: parent.map(str::to_string),
+      label: label.to_string(),
+      default_visible: true,
+    }
+  }
+
+  let mut layers = vec![
+    layer("simhark.debug", None, "Strategy debug"),
+    layer("simhark.debug.strategy", Some("simhark.debug"), "Strategy"),
+    layer("simhark.debug.tasks", Some("simhark.debug"), "Robot tasks"),
+    layer("simhark.debug.holograms", Some("simhark.debug"), "Holograms"),
+    layer("simhark.debug.kicks", Some("simhark.debug"), "Kick lines"),
+  ];
+  for group in ["tasks", "holograms", "kicks"] {
+    let parent = format!("simhark.debug.{group}");
+    for (team, label) in [("blue", "Blue"), ("yellow", "Yellow")] {
+      layers.push(layer(
+        &format!("{parent}.{team}"),
+        Some(&parent),
+        label,
+      ));
+    }
+  }
+  layers
+}
+
+#[cfg(feature = "viewer-debug")]
+fn team_layer(group: &str, team: TeamColor) -> String {
+  match team {
+    TeamColor::Blue => format!("simhark.debug.{group}.blue"),
+    TeamColor::Yellow => format!("simhark.debug.{group}.yellow"),
+  }
+}
+
+#[cfg(feature = "viewer-debug")]
+fn debug_style(color: &str, label: Option<String>) -> interface_protocol::DebugStyle {
+  interface_protocol::DebugStyle {
+    stroke: Some(color.to_string()),
+    fill: None,
+    stroke_width_mm: Some(interface_protocol::Millimetres(20.0)),
+    opacity: 1.0,
+    label,
+    tooltip: None,
+  }
+}
+
+#[cfg(feature = "viewer-debug")]
+fn point_mm(x: f64, y: f64) -> interface_protocol::PointMm {
+  interface_protocol::PointMm {
+    x_mm: interface_protocol::Millimetres(x * 1000.0),
+    y_mm: interface_protocol::Millimetres(y * 1000.0),
+  }
+}
+
+/// Converts the controllers' debug snapshots into canonical primitives.
+///
+/// The renderer only knows about protocol primitives, so anything a controller
+/// publishes has to become one here rather than growing a simhark-shaped
+/// special case in the canvas.
+#[cfg(feature = "viewer-debug")]
+fn canonical_debug_items(
+  debug: &HashMap<usize, ViewerDebugSnapshot>,
+  states: &[WorldState],
+  field: &FieldConfig,
+) -> Vec<interface_protocol::DebugItem> {
+  let half_x = field.field_length * 0.5;
+  let half_y = field.field_width * 0.5;
+  let mut items = Vec::new();
+
+  for state in states {
+    let Some(snapshot) = debug.get(&state.world_id) else {
+      continue;
+    };
+    let world_id = Some(state.world_id as u32);
+
+    if let Some(strategy) = &snapshot.strategy {
+      items.push(interface_protocol::DebugItem {
+        id: format!("simhark.debug.strategy.{}", state.world_id),
+        layer_id: "simhark.debug.strategy".into(),
+        world_id,
+        robot_id: None,
+        primitive: interface_protocol::DebugPrimitive::Text {
+          at: point_mm(0.0, half_y - 0.2),
+          text: strategy.clone(),
+          style: debug_style("#e6edf3", None),
+        },
+        scalar: None,
+        unit: None,
+        range: None,
+      });
+    }
+
+    for robot in &snapshot.robots {
+      // A task label is only meaningful where its robot is, so a robot that
+      // has left the world drops its label rather than drawing it at the
+      // origin.
+      let Some(position) = robot_position(state, robot.team, robot.id) else {
+        continue;
+      };
+      let label = match &robot.message {
+        Some(message) => format!("{} · {message}", robot.task),
+        None => robot.task.clone(),
+      };
+      items.push(interface_protocol::DebugItem {
+        id: format!(
+          "simhark.debug.task.{}.{:?}.{}",
+          state.world_id, robot.team, robot.id
+        ),
+        layer_id: team_layer("tasks", robot.team),
+        world_id,
+        robot_id: Some(robot.id as u32),
+        primitive: interface_protocol::DebugPrimitive::Text {
+          at: point_mm(position.0, position.1 + 0.16),
+          text: label,
+          style: debug_style(&robot.color, None),
+        },
+        scalar: None,
+        unit: None,
+        range: None,
+      });
+    }
+
+    for (index, overlay) in snapshot.overlays.iter().enumerate() {
+      match overlay {
+        DebugOverlay::HoloRobot(holo) => items.push(interface_protocol::DebugItem {
+          id: format!("simhark.debug.holo.{}.{index}", state.world_id),
+          layer_id: team_layer("holograms", holo.team),
+          world_id,
+          robot_id: Some(holo.id as u32),
+          primitive: interface_protocol::DebugPrimitive::RobotPose {
+            at: point_mm(holo.x, holo.y),
+            orientation_rad: interface_protocol::Radians(holo.orientation.unwrap_or(0.0)),
+            team: match holo.team {
+              TeamColor::Blue => interface_protocol::TeamColor::Blue,
+              TeamColor::Yellow => interface_protocol::TeamColor::Yellow,
+            },
+            robot_id: Some(holo.id as u32),
+            style: debug_style(&holo.color, holo.label.clone()),
+          },
+          scalar: None,
+          unit: None,
+          range: None,
+        }),
+        DebugOverlay::KickLine(kick) => {
+          // Draw the shot to where it leaves the field, which is what makes a
+          // kick line readable; a fixed-length stub says nothing about aim.
+          let (dir_x, dir_y) = (kick.angle.cos(), kick.angle.sin());
+          let end = field_boundary_intersection(kick.from_x, kick.from_y, dir_x, dir_y, half_x, half_y)
+            .unwrap_or(BallTrajectoryPoint {
+              x: kick.from_x + dir_x,
+              y: kick.from_y + dir_y,
+            });
+          items.push(interface_protocol::DebugItem {
+            id: format!("simhark.debug.kick.{}.{index}", state.world_id),
+            layer_id: team_layer("kicks", kick.team),
+            world_id,
+            robot_id: Some(kick.id as u32),
+            primitive: interface_protocol::DebugPrimitive::Arrow {
+              from: point_mm(kick.from_x, kick.from_y),
+              to: point_mm(end.x, end.y),
+              style: debug_style(&kick.color, kick.label.clone()),
+            },
+            scalar: None,
+            unit: None,
+            range: None,
+          });
+        }
+      }
+    }
+  }
+
+  items
+}
+
+#[cfg(feature = "viewer-debug")]
+fn robot_position(state: &WorldState, team: TeamColor, id: usize) -> Option<(f64, f64)> {
+  let robots = match team {
+    TeamColor::Blue => &state.blue_robots,
+    TeamColor::Yellow => &state.yellow_robots,
+  };
+  robots
+    .iter()
+    .find(|robot| robot.id == id && robot.is_on)
+    .map(|robot| (robot.x, robot.y))
 }
 
 impl ViewerServer {
@@ -724,7 +1019,7 @@ impl ViewerServer {
     let game_state = Arc::new(Mutex::new(GameStateTracker::default()));
     let test_suite = Arc::new(Mutex::new(None));
     let developer = Arc::new(Mutex::new(None));
-    let developer_requests = Arc::new(Mutex::new(HashMap::new()));
+    let developer_requests = Arc::new(Mutex::new(Vec::new()));
     let goal_tracker = Arc::new(Mutex::new(GoalTracker::default()));
     #[cfg(feature = "viewer-debug")]
     let debug = Arc::new(Mutex::new(HashMap::new()));
@@ -1088,28 +1383,45 @@ impl ViewerServer {
       return;
     };
     let mut developer = self.developer.lock();
-    let results = developer
+    let (results, runs) = developer
       .take()
-      .map(|snapshot| snapshot.results)
+      .map(|snapshot| (snapshot.results, snapshot.runs))
       .unwrap_or_default();
-    *developer = Some(DeveloperSnapshot { schema, results });
+    *developer = Some(DeveloperSnapshot {
+      schema,
+      results,
+      runs,
+    });
   }
 
-  /// Drain the most recent request for each target. Repeated form edits are
-  /// coalesced so the simulation loop cannot be flooded by the browser.
+  /// Drain the queued requests in the order the operator issued them.
+  ///
+  /// Order matters here: `load` followed by `start` in the same tick has to
+  /// stay in that order, and neither may swallow the other.
   pub fn take_developer_requests(&self) -> Vec<DeveloperRequest> {
-    self
-      .developer_requests
-      .lock()
-      .drain()
-      .map(|(_, request)| request)
-      .collect()
+    std::mem::take(&mut *self.developer_requests.lock())
   }
 
   pub fn set_developer_result(&self, result: DeveloperResult) {
     if let Some(developer) = self.developer.lock().as_mut() {
       developer.results.insert(result.target.clone(), result);
     }
+  }
+
+  /// Publishes the lifecycle of one AI Lab target.
+  pub fn set_developer_run(&self, run: DeveloperRun) {
+    if let Some(developer) = self.developer.lock().as_mut() {
+      developer.runs.insert(run.target.clone(), run);
+    }
+  }
+
+  /// The lifecycle currently published for `target`, if any.
+  pub fn developer_run(&self, target: &str) -> Option<DeveloperRun> {
+    self
+      .developer
+      .lock()
+      .as_ref()
+      .and_then(|developer| developer.runs.get(target).cloned())
   }
 
   #[cfg(feature = "viewer-debug")]
@@ -1266,9 +1578,22 @@ impl ViewerServer {
       "debug".into(),
       serde_json::to_value(&frame.debug).unwrap_or(Value::Null),
     );
+    let score = interface_protocol::Score {
+      blue: goal_guard.blue,
+      yellow: goal_guard.yellow,
+    };
+    let referee = canonical_referee(frame.game_state.as_ref(), score.clone());
     let _ = self.interface_publisher.publish(
       self.interface_session,
-      canonical_simhark_snapshot(states, &self.field, properties),
+      canonical_simhark_snapshot(
+        states,
+        &self.field,
+        properties,
+        score,
+        referee,
+        #[cfg(feature = "viewer-debug")]
+        &self.debug.lock(),
+      ),
     );
   }
 
@@ -1293,13 +1618,26 @@ impl ViewerServer {
     let game_state_guard = self.game_state.lock();
     let test_suite = self.test_suite.lock().clone();
     let developer = self.developer.lock().clone();
+    // A replayed frame carries its own recorded debug data. A live snapshot
+    // for the same world still wins, so a controller that is being stepped
+    // alongside the replay is not overwritten by history.
     #[cfg(feature = "viewer-debug")]
-    let debug = self
-      .debug
-      .lock()
-      .get(&state.world_id)
-      .cloned()
-      .or_else(|| replay_frame_debug_snapshot(state.world_id, replay_frame));
+    let debug_by_world: HashMap<usize, ViewerDebugSnapshot> = {
+      let live = self.debug.lock();
+      replay_frame
+        .states
+        .iter()
+        .filter_map(|state| {
+          live
+            .get(&state.world_id)
+            .cloned()
+            .or_else(|| replay_frame_debug_snapshot(state.world_id, replay_frame))
+            .map(|snapshot| (state.world_id, snapshot))
+        })
+        .collect()
+    };
+    #[cfg(feature = "viewer-debug")]
+    let debug = debug_by_world.get(&state.world_id).cloned();
     let robot_inputs = replay_robot_inputs(replay_frame);
     let frame = ViewerFrame {
       world_count: self.world_count,
@@ -1350,6 +1688,11 @@ impl ViewerServer {
     if let Ok(json) = serde_json::to_string(&frame) {
       *self.latest_frame.lock() = Some(json);
     }
+    let score = interface_protocol::Score {
+      blue: goal_guard.blue,
+      yellow: goal_guard.yellow,
+    };
+    let referee = canonical_referee(frame.game_state.as_ref(), score.clone());
     let mut properties = std::collections::BTreeMap::new();
     properties.insert("replay.enabled".into(), Value::Bool(true));
     properties.insert("replay.frame_index".into(), serde_json::json!(frame_index));
@@ -1370,7 +1713,15 @@ impl ViewerServer {
     );
     let _ = self.interface_publisher.publish(
       self.interface_session,
-      canonical_simhark_snapshot(&replay_frame.states, &self.field, properties),
+      canonical_simhark_snapshot(
+        &replay_frame.states,
+        &self.field,
+        properties,
+        score,
+        referee,
+        #[cfg(feature = "viewer-debug")]
+        &debug_by_world,
+      ),
     );
   }
 
@@ -1651,7 +2002,7 @@ fn run_websocket_server(
   robot_rotate_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>>,
   robot_presence_requests: Arc<Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>>,
   ball_move_requests: Arc<Mutex<HashMap<usize, BallMoveRequest>>>,
-  developer_requests: Arc<Mutex<HashMap<String, DeveloperRequest>>>,
+  developer_requests: Arc<Mutex<Vec<DeveloperRequest>>>,
 ) {
   for stream in listener.incoming() {
     let Ok(stream) = stream else {
@@ -1744,13 +2095,11 @@ fn handle_client_message(
   robot_rotate_requests: &Mutex<HashMap<RobotMoveKey, RobotRotateRequest>>,
   robot_presence_requests: &Mutex<HashMap<RobotMoveKey, RobotPresenceRequest>>,
   ball_move_requests: &Mutex<HashMap<usize, BallMoveRequest>>,
-  developer_requests: &Mutex<HashMap<String, DeveloperRequest>>,
+  developer_requests: &Mutex<Vec<DeveloperRequest>>,
 ) {
   if let Some(value) = message.strip_prefix("developer:") {
     if let Ok(request) = serde_json::from_str::<DeveloperRequest>(value) {
-      developer_requests
-        .lock()
-        .insert(request.target().to_owned(), request);
+      let _ = queue_developer_request(developer_requests, request);
     }
     return;
   }
@@ -2138,31 +2487,6 @@ mod tests {
   }
 
   #[test]
-  fn parses_developer_activation_request() {
-    let request = serde_json::from_str::<DeveloperRequest>(
-      r#"{
-        "action": "activate",
-        "target": "blue",
-        "kind": "skill",
-        "entry": "Pass To",
-        "config": {},
-        "params": {"passer": "R0", "receiver": "R1"}
-      }"#,
-    )
-    .unwrap();
-
-    assert!(matches!(
-      request,
-      DeveloperRequest::Activate {
-        target,
-        kind,
-        entry,
-        ..
-      } if target == "blue" && kind == "skill" && entry == "Pass To"
-    ));
-  }
-
-  #[test]
   fn parses_match_developer_requests() {
     let switch = serde_json::from_str::<DeveloperRequest>(
       r#"{"action":"switch_ai","target":"yellow","ai":"bongka"}"#,
@@ -2185,5 +2509,259 @@ mod tests {
         enabled: false,
       } if target == "ball-recovery"
     ));
+  }
+}
+
+#[cfg(test)]
+mod interface_tests {
+  use super::*;
+
+  #[test]
+  fn parses_developer_load_request() {
+    let request = serde_json::from_str::<DeveloperRequest>(
+      r#"{
+        "action": "load",
+        "target": "blue",
+        "kind": "skill",
+        "entry": "Pass To",
+        "config": {},
+        "params": {"passer": "R0", "receiver": "R1"}
+      }"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+      request,
+      DeveloperRequest::Load { target, kind, entry, .. }
+        if target == "blue" && kind == "skill" && entry == "Pass To"
+    ));
+  }
+
+  #[test]
+  fn parses_developer_run_lifecycle_requests() {
+    let start =
+      serde_json::from_str::<DeveloperRequest>(r#"{"action":"start","target":"blue"}"#).unwrap();
+    assert!(matches!(start, DeveloperRequest::Start { target } if target == "blue"));
+
+    let stop =
+      serde_json::from_str::<DeveloperRequest>(r#"{"action":"stop","target":"blue"}"#).unwrap();
+    assert!(matches!(stop, DeveloperRequest::Stop { target } if target == "blue"));
+  }
+
+  #[test]
+  fn queued_requests_keep_their_order() {
+    let queue = Mutex::new(Vec::new());
+    queue_developer_request(
+      &queue,
+      DeveloperRequest::Load {
+        target: "blue".into(),
+        kind: "skill".into(),
+        entry: "Pass To".into(),
+        config: Value::Null,
+        params: Value::Null,
+      },
+    )
+    .unwrap();
+    queue_developer_request(
+      &queue,
+      DeveloperRequest::Start {
+        target: "blue".into(),
+      },
+    )
+    .unwrap();
+
+    let queued = queue.lock();
+    // `load` then `start` in one tick must arrive in that order; coalescing
+    // them per target used to drop the load and fail the start.
+    assert!(matches!(queued[0], DeveloperRequest::Load { .. }));
+    assert!(matches!(queued[1], DeveloperRequest::Start { .. }));
+  }
+
+  #[test]
+  fn a_wedged_queue_refuses_new_requests_instead_of_growing() {
+    let queue = Mutex::new(Vec::new());
+    for _ in 0..DEVELOPER_REQUEST_QUEUE_LIMIT {
+      queue_developer_request(
+        &queue,
+        DeveloperRequest::Start {
+          target: "blue".into(),
+        },
+      )
+      .unwrap();
+    }
+
+    assert!(
+      queue_developer_request(
+        &queue,
+        DeveloperRequest::Start {
+          target: "blue".into(),
+        },
+      )
+      .is_err()
+    );
+    assert_eq!(queue.lock().len(), DEVELOPER_REQUEST_QUEUE_LIMIT);
+  }
+
+  #[cfg(feature = "viewer-debug")]
+  mod debug_conversion {
+    use super::*;
+    use crate::state::{BallState, RobotState};
+    use crate::state::KickStatus;
+
+    fn world() -> WorldState {
+      WorldState {
+        world_id: 0,
+        sim_time: 1.0,
+        frame: 60,
+        ball: BallState {
+          x: 0.0,
+          y: 0.0,
+          z: 0.0,
+          vx: 0.0,
+          vy: 0.0,
+          vz: 0.0,
+        },
+        blue_robots: vec![RobotState {
+          id: 2,
+          team: TeamColor::Blue,
+          x: 1.0,
+          y: -0.5,
+          z: 0.1,
+          orientation: 0.0,
+          vx: 0.0,
+          vy: 0.0,
+          vz: 0.0,
+          v_angular: 0.0,
+          infrared: false,
+          dribbler_on: false,
+          kick_status: KickStatus::NoKick,
+          is_on: true,
+          wheel_speeds: [0.0; 4],
+        }],
+        yellow_robots: Vec::new(),
+        goal_blue: false,
+        goal_yellow: false,
+      }
+    }
+
+    fn snapshot() -> ViewerDebugSnapshot {
+      ViewerDebugSnapshot {
+        world_id: 0,
+        strategy: Some("attacking".to_string()),
+        robots: vec![RobotDebugInfo {
+          team: TeamColor::Blue,
+          id: 2,
+          task: "Attacker".to_string(),
+          color: "#4488ff".to_string(),
+          message: Some("chasing".to_string()),
+        }],
+        overlays: vec![
+          DebugOverlay::HoloRobot(DebugHoloRobot {
+            team: TeamColor::Blue,
+            id: 2,
+            x: 2.0,
+            y: 0.25,
+            orientation: Some(1.0),
+            color: "#4488ff".to_string(),
+            label: Some("target".to_string()),
+          }),
+          DebugOverlay::KickLine(DebugKickLine {
+            team: TeamColor::Blue,
+            id: 2,
+            from_x: 0.0,
+            from_y: 0.0,
+            angle: 0.0,
+            color: "#ffffff".to_string(),
+            label: None,
+          }),
+        ],
+      }
+    }
+
+    #[test]
+    fn every_layer_an_item_uses_is_declared() {
+      let field = crate::WorldConfig::division_b().field;
+      let debug = HashMap::from([(0, snapshot())]);
+      let items = canonical_debug_items(&debug, &[world()], &field);
+      let layers = simhark_debug_layers()
+        .into_iter()
+        .map(|layer| layer.id)
+        .collect::<Vec<_>>();
+
+      assert!(!items.is_empty());
+      for item in &items {
+        assert!(
+          layers.contains(&item.layer_id),
+          "undeclared layer {}",
+          item.layer_id
+        );
+      }
+    }
+
+    #[test]
+    fn a_task_label_follows_its_robot_in_millimetres() {
+      let field = crate::WorldConfig::division_b().field;
+      let debug = HashMap::from([(0, snapshot())]);
+      let items = canonical_debug_items(&debug, &[world()], &field);
+
+      let task = items
+        .iter()
+        .find(|item| item.layer_id == "simhark.debug.tasks.blue")
+        .expect("a task label");
+      assert_eq!(task.robot_id, Some(2));
+      match &task.primitive {
+        interface_protocol::DebugPrimitive::Text { at, text, .. } => {
+          assert_eq!(at.x_mm.0, 1000.0);
+          assert!((at.y_mm.0 - -340.0).abs() < 1.0e-6);
+          assert!(text.contains("Attacker") && text.contains("chasing"));
+        }
+        other => panic!("expected text, got {other:?}"),
+      }
+    }
+
+    #[test]
+    fn a_task_label_for_an_absent_robot_is_dropped() {
+      let field = crate::WorldConfig::division_b().field;
+      let mut state = world();
+      state.blue_robots.clear();
+      let debug = HashMap::from([(0, snapshot())]);
+      let items = canonical_debug_items(&debug, &[state], &field);
+
+      assert!(
+        !items
+          .iter()
+          .any(|item| item.layer_id == "simhark.debug.tasks.blue")
+      );
+    }
+
+    #[test]
+    fn a_kick_line_ends_on_the_field_boundary() {
+      let config = crate::WorldConfig::division_b();
+      let debug = HashMap::from([(0, snapshot())]);
+      let items = canonical_debug_items(&debug, &[world()], &config.field);
+
+      let kick = items
+        .iter()
+        .find(|item| item.layer_id == "simhark.debug.kicks.blue")
+        .expect("a kick line");
+      match &kick.primitive {
+        interface_protocol::DebugPrimitive::Arrow { from, to, .. } => {
+          assert_eq!(from.x_mm.0, 0.0);
+          assert!(
+            (to.x_mm.0 - config.field.field_length * 0.5 * 1000.0).abs() < 1.0,
+            "expected the goal line, got {}",
+            to.x_mm.0
+          );
+        }
+        other => panic!("expected an arrow, got {other:?}"),
+      }
+    }
+
+    #[test]
+    fn worlds_without_debug_data_contribute_nothing() {
+      let field = crate::WorldConfig::division_b().field;
+      let items = canonical_debug_items(&HashMap::new(), &[world()], &field);
+      assert!(items.is_empty());
+    }
   }
 }
