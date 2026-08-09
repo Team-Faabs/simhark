@@ -53,6 +53,10 @@ fn parse() -> Result<Args, String> {
         mc.replay =
           Some(optional_path_arg(&mut it).unwrap_or_else(|| DEFAULT_REPLAY_PATH.to_string()))
       }
+      "--record-interface" => {
+        mc.interface_recording = true;
+        mc.viewer = true;
+      }
       "--summary" => summary = Some(next_arg(&mut it, &a)?),
       "--log-every" => {
         mc.log_every = next_arg(&mut it, &a)?
@@ -148,6 +152,7 @@ Options:\n\
   --matches <n>     play n matches (seeds seed..seed+n) and aggregate\n\
   --log <path>      write SSL log file (Loguna-compatible)\n\
   --replay [path]   write native simhark replay file (.shreplay); with --viewer, serve it afterward\n\
+  --record-interface record canonical state/events to .faabsrec (implies --viewer)\n\
   --summary <path>  append one JSON summary line per run\n\
   --log-every <n>   log every n-th frame (default 2)\n\
   --print-commands  print simulator robot commands to stderr\n\
@@ -211,6 +216,14 @@ fn append_summary(path: &str, report: &MatchReport) {
 
 #[tokio::main]
 async fn main() {
+  if std::env::args_os().len() == 1 {
+    if let Err(error) = serve_empty_start_center().await {
+      eprintln!("failed to start interface: {error:#}");
+      std::process::exit(1);
+    }
+    return;
+  }
+
   let args = match parse() {
     Ok(a) => a,
     Err(e) => {
@@ -267,6 +280,114 @@ async fn main() {
   {
     serve_replay(&path);
   }
+}
+
+async fn serve_empty_start_center() -> anyhow::Result<()> {
+  let port = std::env::var("SIMHARK_VIEWER_PORT")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(8315);
+  loop {
+    let (guard, handle) =
+      webinterface_core::InterfaceHost::start(webinterface_core::InterfaceConfig {
+        bind_address: ([0, 0, 0, 0], port).into(),
+        assets: webinterface_assets::embedded_assets(),
+        ..webinterface_core::InterfaceConfig::default()
+      })?;
+    let mut launcher = handle.register_system(webinterface_protocol::SystemDescriptor {
+      id: "match-runner".into(),
+      label: "Match Runner".into(),
+      kind: webinterface_protocol::SystemKind::Simhark,
+      generation: 1,
+      capabilities: vec![webinterface_protocol::Capability {
+        id: "simhark.launch_match".into(),
+        mutable: true,
+        description: "Validate and launch a match configuration".into(),
+      }],
+    })?;
+    println!("Start Center: {}", handle.http_url());
+    println!("No simulation, world, AI, or match has been created.");
+
+    let configuration = tokio::select! {
+      _ = tokio::signal::ctrl_c() => return Ok(()),
+      command = launcher.commands.recv() => {
+        match command {
+          Some(command) => match command.command {
+            webinterface_protocol::SystemCommand::Simhark(
+              webinterface_protocol::SimharkCommand::LaunchMatch(configuration)
+            ) => {
+              launcher.publisher.acknowledge(
+                command.browser_command_id,
+                webinterface_protocol::CommandStatus::Applied,
+                "validated; rebuilding host for match session",
+              );
+              configuration
+            }
+            _ => {
+              launcher.publisher.acknowledge(
+                command.browser_command_id,
+                webinterface_protocol::CommandStatus::Rejected,
+                "match-runner only accepts launch_match",
+              );
+              continue;
+            }
+          },
+          None => continue,
+        }
+      }
+    };
+    drop(handle);
+    drop(guard);
+    run_configured_matches(configuration)?;
+  }
+}
+
+fn run_configured_matches(
+  configuration: webinterface_protocol::MatchConfiguration,
+) -> anyhow::Result<()> {
+  let blue = TeamKind::parse(&configuration.blue_controller).map_err(anyhow::Error::msg)?;
+  let yellow = TeamKind::parse(&configuration.yellow_controller).map_err(anyhow::Error::msg)?;
+  if configuration.blue_robots as usize > MAX_ROBOTS_PER_TEAM
+    || configuration.yellow_robots as usize > MAX_ROBOTS_PER_TEAM
+  {
+    anyhow::bail!("robot count exceeds {MAX_ROBOTS_PER_TEAM}");
+  }
+  let seconds = configuration
+    .duration_ns
+    .map(|duration| duration as f64 / 1_000_000_000.0)
+    .unwrap_or(60.0);
+  if !seconds.is_finite() || seconds <= 0.0 {
+    anyhow::bail!("duration must be positive and finite");
+  }
+  let division = configuration
+    .division
+    .chars()
+    .next()
+    .unwrap_or('b')
+    .to_ascii_lowercase();
+  if !matches!(division, 'a' | 'b') {
+    anyhow::bail!("division must be A or B");
+  }
+  let count = configuration.batch_count.max(1);
+  for index in 0..count {
+    let config = MatchConfig {
+      blue: blue.clone(),
+      yellow: yellow.clone(),
+      blue_bots: Some(configuration.blue_robots as usize),
+      yellow_bots: Some(configuration.yellow_robots as usize),
+      seconds,
+      div: division,
+      seed: configuration.seed.wrapping_add(index as u64),
+      viewer: true,
+      realtime: !configuration.precompute,
+      dev: configuration.development,
+      interface_recording: configuration.record,
+      ..MatchConfig::default()
+    };
+    let report = run_match(&config);
+    print_report(&report, false);
+  }
+  Ok(())
 }
 
 fn default_replay_path(mc: &MatchConfig) -> String {

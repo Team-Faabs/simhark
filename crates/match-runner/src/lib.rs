@@ -13,7 +13,7 @@ pub mod referris_autoref;
 pub mod sumatra_match;
 
 #[cfg(feature = "viewer")]
-use controller::hot_swappable_team_kinds;
+use controller::{Controller, hot_swappable_team_kinds};
 use controller::{TeamKind, build_controller};
 use director::MatchDirector;
 use evaluator::{Evaluator, MatchReport};
@@ -42,6 +42,8 @@ pub struct MatchConfig {
   pub seed: u64,
   pub log: Option<String>,
   pub replay: Option<String>,
+  /// Record canonical interface state/events to `.faabsrec`.
+  pub interface_recording: bool,
   pub log_every: u64,
   pub quiet: bool,
   /// Open the live web viewer (requires the `viewer` build feature).
@@ -72,6 +74,7 @@ impl Default for MatchConfig {
       seed: 1,
       log: None,
       replay: None,
+      interface_recording: false,
       log_every: 2,
       quiet: false,
       viewer: false,
@@ -209,11 +212,16 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   };
 
   #[cfg(feature = "viewer")]
-  let viewer = if (mc.viewer || mc.dev) && mc.replay.is_none() {
+  let viewer = if (mc.viewer || mc.dev) && (mc.replay.is_none() || mc.interface_recording) {
     let vc = simhark::viewer::ViewerConfig::default();
     match simhark::viewer::ViewerServer::bind(vc, 1, &cfg) {
       Ok(v) => {
         v.enable_web_control_running();
+        if mc.interface_recording
+          && let Err(error) = v.start_recording()
+        {
+          eprintln!("failed to start interface recording: {error}");
+        }
         configure_developer_console(
           &v,
           mc.dev,
@@ -237,6 +245,16 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     None
   };
   let pace = mc.replay.is_none() && (mc.realtime || mc.viewer || mc.dev);
+  #[cfg(feature = "viewer")]
+  if let Some(viewer) = &viewer {
+    attach_controller_interfaces(viewer, &mut blue_ctrl, &mut yellow_ctrl);
+    #[cfg(feature = "referris")]
+    if let Err(error) =
+      referris.attach_interface(&viewer.interface_handle(), viewer.interface_session_id())
+    {
+      eprintln!("failed to attach Referris interface: {error}");
+    }
+  }
 
   let kickoff = director.kickoff_reset();
   let mut state = engine
@@ -251,10 +269,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   }
 
   let mut command_counter: u32 = 1;
+  #[cfg(feature = "viewer")]
+  let mut cancelled_by_operator = false;
   while !director.is_over(&state) {
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
       if v.take_stop_request() {
+        cancelled_by_operator = true;
         break;
       }
       if v.take_restart_request() {
@@ -269,7 +290,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         evaluator = Evaluator::new(cfg.clone(), blue_name.clone(), yellow_name.clone());
         #[cfg(feature = "referris")]
         {
+          v.interface_handle().unregister_system("referris");
           referris = referris_autoref::ReferrisAutoref::new();
+          if let Err(error) =
+            referris.attach_interface(&v.interface_handle(), v.interface_session_id())
+          {
+            eprintln!("failed to reattach Referris interface: {error}");
+          }
         }
         pickup_validator = PickupValidator::default();
         command_counter = 1;
@@ -285,6 +312,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
           yellow_ctrl.as_deref(),
           director.teleport_ball_on_no_progress(),
         );
+        attach_controller_interfaces(v, &mut blue_ctrl, &mut yellow_ctrl);
       }
       apply_developer_requests(
         v,
@@ -293,6 +321,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         &mut yellow_ctrl,
         bots,
         &mut director,
+        &state,
       );
       if mc.dev {
         let current_blue_name = format!(
@@ -417,6 +446,17 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
         blue_name: Some(published_blue_name),
         yellow_name: Some(published_yellow_name),
       });
+      // Without Referris the match director is the referee, and it is the only
+      // thing that knows the current phase. Publishing it keeps the Referee
+      // panel honest instead of permanently empty.
+      #[cfg(not(feature = "referris"))]
+      v.set_game_state(simhark::viewer::GameStateInfo {
+        command: director_command_label(&director).to_string(),
+        command_counter,
+        stage: None,
+        blue_name: Some(blue_name.clone()),
+        yellow_name: Some(yellow_name.clone()),
+      });
       #[cfg(feature = "viewer-debug")]
       publish_controller_debug(
         v,
@@ -444,7 +484,52 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
   if let (Some(path), Some(replay)) = (&mc.replay, replay) {
     write_replay(path, replay.finish());
   }
+
+  #[cfg(feature = "viewer")]
+  if let Some(viewer) = &viewer {
+    let lifecycle = if cancelled_by_operator {
+      webinterface_protocol::SessionLifecycle::Cancelled
+    } else {
+      webinterface_protocol::SessionLifecycle::Completed
+    };
+    if let Err(error) = viewer.finish_session(lifecycle, None) {
+      eprintln!("failed to finalize interface session: {error}");
+    }
+  }
   evaluator.finish(state.sim_time)
+}
+
+#[cfg(feature = "viewer")]
+fn attach_controller_interfaces(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: &mut Option<Box<dyn Controller>>,
+  yellow: &mut Option<Box<dyn Controller>>,
+) {
+  let handle = viewer.interface_handle();
+  let session_id = viewer.interface_session_id();
+  if let Some(controller) = blue.as_deref_mut()
+    && let Err(error) = controller.attach_interface(&handle, session_id)
+  {
+    eprintln!("failed to attach blue controller to shared interface: {error}");
+  }
+  if let Some(controller) = yellow.as_deref_mut()
+    && let Err(error) = controller.attach_interface(&handle, session_id)
+  {
+    eprintln!("failed to attach yellow controller to shared interface: {error}");
+  }
+}
+
+/// The director's phase as an SSL-style command label.
+///
+/// simhark has no game controller, so this is the closest honest description
+/// of what the match is doing when Referris is not compiled in.
+#[cfg(all(feature = "viewer", not(feature = "referris")))]
+fn director_command_label(director: &MatchDirector) -> &'static str {
+  match director.referee_command_code() {
+    4 => "PREPARE_KICKOFF_YELLOW",
+    5 => "PREPARE_KICKOFF_BLUE",
+    _ => "FORCE_START",
+  }
 }
 
 #[cfg(feature = "viewer")]
@@ -529,6 +614,7 @@ fn configure_developer_console(
 }
 
 #[cfg(feature = "viewer")]
+#[allow(clippy::too_many_arguments)]
 fn apply_developer_requests(
   viewer: &simhark::viewer::ViewerServer,
   dev: bool,
@@ -536,6 +622,7 @@ fn apply_developer_requests(
   yellow: &mut Option<Box<dyn controller::Controller>>,
   bots: TeamBotCounts,
   director: &mut MatchDirector,
+  state: &simhark::WorldState,
 ) {
   let requests = viewer.take_developer_requests();
   let controls_changed = !requests.is_empty();
@@ -552,24 +639,31 @@ fn apply_developer_requests(
           if *enabled { "enabled" } else { "disabled" }
         ))
       }
-      simhark::viewer::DeveloperRequest::Activate { .. }
+      simhark::viewer::DeveloperRequest::Load { .. }
+      | simhark::viewer::DeveloperRequest::Start { .. }
+      | simhark::viewer::DeveloperRequest::Stop { .. }
       | simhark::viewer::DeveloperRequest::Disable { .. } => {
-        let controller = match target.as_str() {
-          "blue" => blue.as_deref_mut(),
-          "yellow" => yellow.as_deref_mut(),
-          _ => None,
+        let (controller, color) = match target.as_str() {
+          "blue" => (blue.as_deref_mut(), TeamColor::Blue),
+          "yellow" => (yellow.as_deref_mut(), TeamColor::Yellow),
+          _ => (None, TeamColor::Blue),
         };
+        let gc = director.command_for(color);
         controller
           .ok_or_else(|| format!("no controller is available for target {target}"))
-          .and_then(|controller| controller.apply_developer_request(&request))
+          .and_then(|controller| {
+            controller.apply_developer_request(&request, state, color, gc)
+          })
       }
       _ => Err("request is not available in this match mode".to_string()),
     };
     let entry = match &request {
-      simhark::viewer::DeveloperRequest::Activate { entry, .. } => Some(entry.clone()),
+      simhark::viewer::DeveloperRequest::Load { entry, .. } => Some(entry.clone()),
       simhark::viewer::DeveloperRequest::SwitchAi { ai, .. } => Some(ai.clone()),
-      simhark::viewer::DeveloperRequest::Disable { .. } => None,
-      simhark::viewer::DeveloperRequest::SetBallRecovery { .. } => None,
+      simhark::viewer::DeveloperRequest::Start { .. }
+      | simhark::viewer::DeveloperRequest::Stop { .. }
+      | simhark::viewer::DeveloperRequest::Disable { .. }
+      | simhark::viewer::DeveloperRequest::SetBallRecovery { .. } => None,
     };
     viewer.set_developer_result(simhark::viewer::DeveloperResult {
       target,
@@ -586,6 +680,54 @@ fn apply_developer_requests(
       yellow.as_deref(),
       director.teleport_ball_on_no_progress(),
     );
+  }
+  publish_developer_runs(viewer, blue.as_deref(), yellow.as_deref(), state.frame);
+}
+
+/// Mirrors each controller's AI Lab lifecycle into the viewer snapshot.
+///
+/// Run state changes on its own — an entry finishes or fails mid-tick without
+/// any operator request — so this runs every iteration and republishes only
+/// what actually changed.
+#[cfg(feature = "viewer")]
+fn publish_developer_runs(
+  viewer: &simhark::viewer::ViewerServer,
+  blue: Option<&dyn controller::Controller>,
+  yellow: Option<&dyn controller::Controller>,
+  frame: u64,
+) {
+  for (target, controller) in [("blue", blue), ("yellow", yellow)] {
+    let Some(mut run) = controller.and_then(controller::Controller::developer_run) else {
+      continue;
+    };
+    run.target = target.to_string();
+
+    let previous = viewer.developer_run(target);
+    if previous
+      .as_ref()
+      .is_some_and(|previous| previous.state == run.state && previous.entry == run.entry)
+    {
+      continue;
+    }
+
+    // Carry the original start frame across state changes so the timeline can
+    // show how long a run took.
+    run.started_frame = match run.state {
+      webinterface_protocol::DeveloperRunState::Running => previous
+        .as_ref()
+        .and_then(|previous| previous.started_frame)
+        .or(Some(frame)),
+      webinterface_protocol::DeveloperRunState::Idle
+      | webinterface_protocol::DeveloperRunState::Loaded => None,
+      _ => previous.as_ref().and_then(|previous| previous.started_frame),
+    };
+    run.finished_frame = match run.state {
+      webinterface_protocol::DeveloperRunState::Finished
+      | webinterface_protocol::DeveloperRunState::Stopped
+      | webinterface_protocol::DeveloperRunState::Failed => Some(frame),
+      _ => None,
+    };
+    viewer.set_developer_run(run);
   }
 }
 

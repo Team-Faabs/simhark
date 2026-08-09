@@ -16,6 +16,8 @@ use core_dump::types::{Ai, DummyAi};
 use crashpilot::CrashPilot;
 use crashpilot::communication::RobotHeartbeat;
 use crashpilot::config::{LoggingConfig, RobotConfig, ServerConfig, SslConfig};
+#[cfg(feature = "viewer")]
+use prost::Message;
 use simhark::{TeamColor, WorldCommand, WorldState};
 use std::collections::HashMap;
 use std::mem;
@@ -45,17 +47,16 @@ pub struct Faabs<A: Ai = DummyAi> {
   pub interface: EventShare,
   #[cfg(feature = "interface")]
   pub ws_out: crashpilot::communication::WebsocketOut,
+  #[cfg(feature = "interface")]
+  interface_thread: Option<std::thread::JoinHandle<()>>,
+  #[cfg(feature = "viewer")]
+  shared_interface: Option<webinterface_crashpilot_bridge::CrashPilotAdapter>,
 }
 
 impl<A: Ai + Default + Send> Faabs<A> {
   pub fn with_interface(num_robots: u8, team: TeamColor) -> Self {
-    let faabs = Self::new(num_robots, team);
-
-    faabs.start_interface();
-
-    faabs
+    Self::new(num_robots, team)
   }
-
 
   pub fn new(num_robots: u8, team: TeamColor) -> Self {
     Self::with_ai(num_robots, team, A::default())
@@ -63,14 +64,18 @@ impl<A: Ai + Default + Send> Faabs<A> {
 }
 
 impl<A: Ai> Faabs<A> {
-  fn start_interface(&self) {
+  fn start_interface(&mut self) {
     #[cfg(feature = "interface")]
     {
       let cfg = get_config(self.robots.len() as u8);
       let tx = self.interface.clone();
       let ws_out = self.ws_out.clone();
+      let websocket_url = format!("ws://127.0.0.1:{}/ws", cfg.server.websocket_port);
 
-      crashpilot::interface::spawn_interface();
+      self.interface_thread = Some(
+        crashpilot::interface::spawn_interface(websocket_url)
+          .expect("failed to start Rust CrashPilot interface owner"),
+      );
 
       tokio::spawn(async move {
         crate::interface::spawn_websocket(&cfg, tx, ws_out).await;
@@ -103,7 +108,7 @@ impl<A: Ai + Send> Faabs<A> {
     #[cfg(not(feature = "ssl_game_controller"))]
     let comm = ();
 
-    let this = Self {
+    let mut this = Self {
       robots,
       crash_pilot: CrashPilot::from_parts(
         cp_config,
@@ -125,11 +130,38 @@ impl<A: Ai + Send> Faabs<A> {
       interface: EventShare::default(),
       #[cfg(feature = "interface")]
       ws_out: crashpilot::communication::WebsocketOut::new(),
+      #[cfg(feature = "interface")]
+      interface_thread: None,
+      #[cfg(feature = "viewer")]
+      shared_interface: None,
     };
 
     this.start_interface();
 
     this
+  }
+
+  #[cfg(feature = "viewer")]
+  pub fn attach_shared_interface(
+    &mut self,
+    handle: &webinterface_core::InterfaceHandle,
+    session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), webinterface_core::InterfaceError> {
+    let suffix = match self.team {
+      TeamColor::Blue => "blue",
+      TeamColor::Yellow => "yellow",
+    };
+    let system_id = format!("crashpilot-{suffix}");
+    handle.unregister_system(&system_id);
+    self.shared_interface = Some(
+      webinterface_crashpilot_bridge::CrashPilotAdapter::register_with_id(
+        handle,
+        session_id,
+        system_id,
+        format!("CrashPilot ({suffix})"),
+      )?,
+    );
+    Ok(())
   }
 
   pub fn step(
@@ -140,6 +172,16 @@ impl<A: Ai + Send> Faabs<A> {
   ) {
     world_state_to_cp_events(&mut self.events, state);
     self.events.gc = referee;
+
+    #[cfg(feature = "viewer")]
+    if let Some(interface) = self.shared_interface.as_mut() {
+      while let Ok(Some((_command_id, payload))) = interface.try_next_command_bytes() {
+        match crashpilot::core_dump::proto::CrashpilotInterfaceInput::decode(payload.as_slice()) {
+          Ok(command) => self.events.ws = Some(command),
+          Err(error) => eprintln!("shared interface command decode failed: {error}"),
+        }
+      }
+    }
 
     #[cfg(feature = "interface")]
     {
@@ -165,7 +207,14 @@ impl<A: Ai + Send> Faabs<A> {
 
     #[cfg(feature = "interface")]
     {
-      self.ws_out.publish_sync(interface);
+      self.ws_out.publish_sync(interface.clone());
+    }
+
+    #[cfg(feature = "viewer")]
+    if let Some(shared_interface) = self.shared_interface.as_mut() {
+      if let Err(error) = shared_interface.ingest_bytes(&interface.encode_to_vec()) {
+        eprintln!("shared CrashPilot interface publish failed: {error}");
+      }
     }
 
     self.events.ws = ws;

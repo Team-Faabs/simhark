@@ -34,13 +34,34 @@ pub enum GameCommand {
 pub trait Controller {
   fn name(&self) -> &str;
   #[cfg(feature = "viewer")]
+  fn attach_interface(
+    &mut self,
+    _handle: &webinterface_core::InterfaceHandle,
+    _session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), String> {
+    Ok(())
+  }
+  #[cfg(feature = "viewer")]
   fn developer_schema(&self) -> Option<serde_json::Value> {
     None
   }
+  /// Current AI Lab lifecycle, for controllers that can run registry entries.
+  /// The `target` field is filled in by the match runner, which owns the
+  /// mapping from side to target id.
+  #[cfg(feature = "viewer")]
+  fn developer_run(&self) -> Option<simhark::viewer::DeveloperRun> {
+    None
+  }
+  /// Applies one AI Lab action. `world`, `color` and `gc` describe the tick the
+  /// request is being applied on: starting an entry instantiates it against the
+  /// current world, so it cannot be handled without one.
   #[cfg(feature = "viewer")]
   fn apply_developer_request(
     &mut self,
     _request: &simhark::viewer::DeveloperRequest,
+    _world: &WorldState,
+    _color: TeamColor,
+    _gc: GameCommand,
   ) -> Result<String, String> {
     Err("this controller does not expose developer actions".to_string())
   }
@@ -89,6 +110,18 @@ fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
 impl<A: Ai + Send> Controller for FaabsController<A> {
   fn name(&self) -> &str {
     &self.name
+  }
+
+  #[cfg(feature = "viewer")]
+  fn attach_interface(
+    &mut self,
+    handle: &webinterface_core::InterfaceHandle,
+    session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), String> {
+    self
+      .faabs
+      .attach_shared_interface(handle, session_id)
+      .map_err(|error| error.to_string())
   }
 
   #[cfg(feature = "viewer-debug")]
