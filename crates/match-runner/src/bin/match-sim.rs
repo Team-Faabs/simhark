@@ -76,6 +76,8 @@ fn parse() -> Result<Args, String> {
           mc.dev = true;
           mc.viewer = true;
           mc.realtime = true;
+          // Dev matches start without ball recovery; toggle it in the dev console.
+          mc.teleport_ball_on_no_progress = false;
         }
       }
       "--quiet" => mc.quiet = true,
@@ -153,7 +155,7 @@ Options:\n\
   --validate-pickup warn if close slow pickup or fast predicted pickup is neglected\n\
   --viewer          open the live web viewer (build with --features viewer)\n\
   --realtime        pace the sim to ~60Hz wall-clock\n\
-  --dev             unlimited live match with AI hot-swap and ball-recovery controls\n\
+  --dev             unlimited live match with AI hot-swap and ball-recovery controls (recovery off by default)\n\
   --quiet           less stdout\n\
 \n\
 Team kinds: bangka | bongka[:params.json] | ungabunga[:params.json] | crashpilot[:model.safetensors] | dummy | sumatra (real, external JVM)\n\
