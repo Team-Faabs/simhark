@@ -55,9 +55,9 @@ env_logger = "0.11"
 prost = "0.14.3"
 prost-types = "0.14.3"
 loguna = { path = "../loguna/loguna" }
-webinterface-assets = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f", optional = true }
-webinterface-core = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f", optional = true }
-webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/CrashPilot-Interface", rev = "1e10e9cebeec8bfc4ce93eb36522971dd59f016f", optional = true }
+webinterface-assets = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
+webinterface-core = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
+webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
 tokio = { version = "1.52.3", features = ["sync"], optional = true }
 
 [dev-dependencies]
