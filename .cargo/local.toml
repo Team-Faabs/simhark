@@ -19,9 +19,10 @@ referris-simhark = { path = "../referris/referris-simhark" }
 [patch."https://github.com/Technulgy-LGNU/simhark"]
 simhark = { path = "../simhark" }
 
-[patch."https://github.com/Technulgy-LGNU/CrashPilot-Interface"]
-webinterface-assets = { path = "../CrashPilot-Interface/crates/webinterface-assets" }
-webinterface-core = { path = "../CrashPilot-Interface/crates/webinterface-core" }
-webinterface-crashpilot-bridge = { path = "../CrashPilot-Interface/crates/webinterface-crashpilot-bridge" }
-webinterface-protocol = { path = "../CrashPilot-Interface/crates/webinterface-protocol" }
-webinterface-recording = { path = "../CrashPilot-Interface/crates/webinterface-recording" }
+[patch."https://github.com/Team-Faabs/interfaabs"]
+webinterface-assets = { path = "../interfaabs/crates/webinterface-assets" }
+webinterface-core = { path = "../interfaabs/crates/webinterface-core" }
+webinterface-crashpilot-bridge = { path = "../interfaabs/crates/webinterface-crashpilot-bridge" }
+webinterface-protocol = { path = "../interfaabs/crates/webinterface-protocol" }
+webinterface-recording = { path = "../interfaabs/crates/webinterface-recording" }
+webinterface-dehumanized-schema = { path = "../interfaabs/crates/webinterface-dehumanized-schema" }

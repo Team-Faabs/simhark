@@ -22,6 +22,7 @@ use simhark::{
   WorldConfig, WorldState,
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use webinterface_dehumanized_schema::renderer_schema;
 use webinterface_protocol::DeveloperRunState;
 
 const MM_PER_M: f64 = 1_000.0;
@@ -367,7 +368,7 @@ impl Controller for DirectDehumanizedController {
 
   #[cfg(feature = "viewer")]
   fn developer_schema(&self) -> Option<Value> {
-    Some(dehumanized::skills::registry::renderer_schema())
+    Some(renderer_schema())
   }
 
   #[cfg(feature = "viewer")]
