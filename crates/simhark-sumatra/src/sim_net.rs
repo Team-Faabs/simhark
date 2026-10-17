@@ -46,10 +46,20 @@ struct SumatraClient {
 impl SumatraSimNetServer {
   /// The optional backend supplies a tracker snapshot, never a physics World.
   #[cfg(feature = "realistic")]
-  pub fn exchange_observed(&mut self, observed: &WorldState, config: &simhark::WorldConfig) -> Result<WorldCommand> {
+  pub fn exchange_observed(
+    &mut self,
+    observed: &WorldState,
+    config: &simhark::WorldConfig,
+  ) -> Result<WorldCommand> {
     self.accept_new_clients()?;
     self.publish_state(observed)?;
-    let actions = self.receive_actions(observed, TeamConfigs {blue:&config.blue_robots,yellow:&config.yellow_robots})?;
+    let actions = self.receive_actions(
+      observed,
+      TeamConfigs {
+        blue: &config.blue_robots,
+        yellow: &config.yellow_robots,
+      },
+    )?;
     Ok(merge_actions_into_world_command(actions))
   }
   pub fn bind(config: SumatraSimNetConfig) -> Result<Self> {
