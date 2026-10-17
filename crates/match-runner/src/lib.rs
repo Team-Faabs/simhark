@@ -7,6 +7,8 @@ mod direct_dehumanized;
 pub mod director;
 pub mod evaluator;
 pub mod logio;
+#[cfg(feature = "realistic")]
+pub mod realistic_match;
 #[cfg(feature = "referris")]
 pub mod referris_autoref;
 #[cfg(feature = "sumatra")]
@@ -31,6 +33,9 @@ const SIM_TIME_STEP_MS: &str = "16.666666";
 /// Everything needed to play one match.
 #[derive(Clone)]
 pub struct MatchConfig {
+  pub physics_config: Option<std::path::PathBuf>,
+  #[cfg(feature = "realistic")]
+  pub realistic_profile: Option<simhark::realistic::RealisticConfig>,
   pub blue: TeamKind,
   pub yellow: TeamKind,
   /// Available blue robots. Defaults to the division robot count.
@@ -63,6 +68,9 @@ pub struct MatchConfig {
 impl Default for MatchConfig {
   fn default() -> Self {
     Self {
+      physics_config: None,
+      #[cfg(feature = "realistic")]
+      realistic_profile: None,
       blue: TeamKind::Bangka,
       yellow: TeamKind::Bangka,
       blue_bots: None,
@@ -92,6 +100,9 @@ pub fn world_config(div: char, seed: u64) -> WorldConfig {
   };
   cfg.seed = seed;
   cfg
+    .load_default_simulation_config()
+    .expect("failed to load simulator config.toml");
+  cfg
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +112,23 @@ pub(crate) struct TeamBotCounts {
 }
 
 impl MatchConfig {
+  pub fn world_config(&self) -> WorldConfig {
+    let mut cfg = match self.div {
+      'a' | 'A' => WorldConfig::division_a(),
+      _ => WorldConfig::division_b(),
+    };
+    if let Some(path) = &self.physics_config {
+      cfg
+        .load_simulation_config(path)
+        .expect("failed to load --physics-config");
+    } else {
+      cfg
+        .load_default_simulation_config()
+        .expect("failed to load simulator config.toml");
+    }
+    cfg.seed = self.seed;
+    cfg
+  }
   pub(crate) fn bot_counts(&self, default: usize) -> TeamBotCounts {
     TeamBotCounts {
       blue: self.blue_bots.unwrap_or(default),
@@ -128,13 +156,18 @@ fn physical_bot_count(configured: Option<usize>, default: usize) -> usize {
 /// If either side is an external AI (e.g. the real Sumatra), the match is run
 /// through the SimNet hybrid path; otherwise both sides are driven in-process.
 pub fn run_match(mc: &MatchConfig) -> MatchReport {
+  #[cfg(feature = "realistic")]
+  if let Some(profile) = &mc.realistic_profile {
+    return realistic_match::run(mc, profile.clone())
+      .unwrap_or_else(|e| panic!("realistic match failed: {e:#}"));
+  }
   #[cfg(feature = "sim-time")]
   let _fixed_firmware_dt = FixedFirmwareDt::enable();
 
   #[cfg(not(feature = "viewer"))]
   if mc.dev {
     eprintln!("development matches require building match-runner with `--features viewer`");
-    let cfg = world_config(mc.div, mc.seed);
+    let cfg = mc.world_config();
     return Evaluator::new(
       cfg,
       format!("blue:{}", mc.blue.label()),
@@ -143,13 +176,13 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
     .finish(0.0);
   }
 
-  let default_bots = world_config(mc.div, mc.seed).robots_per_team;
+  let default_bots = mc.world_config().robots_per_team;
   let route_bots = mc.bot_counts(default_bots);
   let has_active_external = (route_bots.blue > 0 && mc.blue.is_external())
     || (route_bots.yellow > 0 && mc.yellow.is_external());
   if mc.dev && has_active_external {
     eprintln!("--dev does not support matches containing Sumatra; use in-process AIs only");
-    let cfg = world_config(mc.div, mc.seed);
+    let cfg = mc.world_config();
     return Evaluator::new(
       cfg,
       format!("blue:{}", mc.blue.label()),
@@ -165,7 +198,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
       eprintln!(
         "sumatra matches require building match-runner with `--features sumatra` and setting SIMHARK_SUMATRA_REPO_ROOT"
       );
-      let cfg = world_config(mc.div, mc.seed);
+      let cfg = mc.world_config();
       return Evaluator::new(
         cfg,
         format!("blue:{}", mc.blue.label()),
@@ -174,7 +207,7 @@ pub fn run_match(mc: &MatchConfig) -> MatchReport {
       .finish(0.0);
     }
   }
-  let mut cfg = world_config(mc.div, mc.seed);
+  let mut cfg = mc.world_config();
   let default_bots = cfg.robots_per_team;
   let bots = mc.bot_counts(default_bots);
   let physical_bots = mc.physical_bot_counts(default_bots);
@@ -538,7 +571,7 @@ fn apply_developer_requests(
   director: &mut MatchDirector,
 ) {
   let requests = viewer.take_developer_requests();
-  let controls_changed = !requests.is_empty();
+  let mut controls_changed = !requests.is_empty();
   for request in requests {
     let target = request.target().to_string();
     let result = match &request {
@@ -578,10 +611,25 @@ fn apply_developer_requests(
       message: result.unwrap_or_else(|error| error),
     });
   }
-  if dev && controls_changed {
+  #[cfg(feature = "hotreload")]
+  for (target, slot) in [("blue", &mut *blue), ("yellow", &mut *yellow)] {
+    if let Some((ok, message)) = slot
+      .as_deref_mut()
+      .and_then(|controller| controller.hotreload_update())
+    {
+      viewer.set_developer_result(simhark::viewer::DeveloperResult {
+        target: target.into(),
+        entry: None,
+        ok,
+        message,
+      });
+      controls_changed = true;
+    }
+  }
+  if controls_changed {
     configure_developer_console(
       viewer,
-      true,
+      dev,
       blue.as_deref(),
       yellow.as_deref(),
       director.teleport_ball_on_no_progress(),

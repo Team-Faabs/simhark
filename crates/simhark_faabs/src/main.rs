@@ -27,7 +27,10 @@ fn main() {
 }
 
 fn run() {
-  let config = WorldConfig::division_b();
+  let mut config = WorldConfig::division_b();
+  config
+    .load_default_simulation_config()
+    .expect("failed to load simulator configuration");
 
   let mut engine = SimulationEngine::new(1, config.clone());
 

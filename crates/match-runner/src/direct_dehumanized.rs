@@ -35,14 +35,47 @@ pub struct DirectDehumanizedController {
   num_robots: u8,
   active_registry_entry: Option<ActiveRegistryEntry>,
   last_invocation_error: Option<String>,
+  #[cfg(feature = "hotreload")]
+  last_reload_status: Option<Value>,
 }
 
 #[derive(Clone)]
 struct ActiveRegistryEntry {
   name: String,
-  factory: &'static dyn SkillFactory,
+  factory: RegistryFactory,
   config: Value,
   params: Value,
+}
+
+#[derive(Clone, Copy)]
+enum RegistryFactory {
+  Skill(&'static dyn SkillFactory),
+  Play(&'static dyn dehumanized::play::PlayFactory),
+}
+impl RegistryFactory {
+  fn validate(&self, config: &Value, params: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    match self {
+      Self::Skill(f) => f.validate(config, params),
+      Self::Play(f) => f.validate(config, params),
+    }
+  }
+  fn step(
+    &self,
+    config: Value,
+    params: Value,
+    state: &MutGameState,
+    commands: &MutCommands,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    match self {
+      Self::Skill(f) => {
+        f.instantiate(config, params, state, commands)?.step();
+      }
+      Self::Play(f) => {
+        f.instantiate(config, params, state, commands)?.step();
+      }
+    }
+    Ok(())
+  }
 }
 
 impl DirectDehumanizedController {
@@ -52,6 +85,8 @@ impl DirectDehumanizedController {
       num_robots,
       active_registry_entry: None,
       last_invocation_error: None,
+      #[cfg(feature = "hotreload")]
+      last_reload_status: None,
     }
   }
 
@@ -66,19 +101,19 @@ impl DirectDehumanizedController {
       }
       let state = MutGameState::new(game_state);
       let commands = MutCommands::new(initial);
-      let mut skill = active
+      active
         .factory
-        .instantiate(active.config, active.params, &state, &commands)
+        .step(active.config, active.params, &state, &commands)
         .map_err(|error| error.to_string())?;
-      skill.step();
-      drop(skill);
 
       let mut output = commands.commands();
       for command in output.iter_mut().flatten() {
         // Direct registry execution intentionally bypasses the normal AI and
         // collision planner. The simhark binding below turns these targets
         // straight into simulator drive velocities.
-        command.raw_movement = true;
+        if let Some(motion) = &mut command.motion {
+          motion.obstacles.raw_movement = true;
+        }
       }
       Ok::<_, String>(output)
     }));
@@ -109,12 +144,36 @@ impl DirectDehumanizedController {
 }
 
 impl Controller for DirectDehumanizedController {
+  #[cfg(all(feature = "viewer", feature = "hotreload"))]
+  fn hotreload_update(&mut self) -> Option<(bool, String)> {
+    let status = self
+      .ai
+      .hotreload(serde_json::json!({"action": "status"}))
+      .unwrap_or_else(|error| serde_json::json!({"ok": false, "message": error}));
+    if self.last_reload_status.as_ref() == Some(&status) {
+      return None;
+    }
+    let result = (
+      status["ok"].as_bool().unwrap_or(false),
+      status["message"]
+        .as_str()
+        .unwrap_or("Core updated")
+        .to_string(),
+    );
+    self.last_reload_status = Some(status);
+    Some(result)
+  }
+
   fn name(&self) -> &str {
     "dehumanized"
   }
 
   #[cfg(feature = "viewer")]
   fn developer_schema(&self) -> Option<Value> {
+    #[cfg(feature = "hotreload")]
+    if let Ok(schema) = self.ai.hotreload_schema() {
+      return Some(schema);
+    }
     Some(dehumanized::skills::registry::renderer_schema())
   }
 
@@ -125,6 +184,10 @@ impl Controller for DirectDehumanizedController {
   ) -> Result<String, String> {
     match request {
       simhark::viewer::DeveloperRequest::Disable { .. } => {
+        #[cfg(feature = "hotreload")]
+        self
+          .ai
+          .hotreload(serde_json::json!({"action": "disable"}))?;
         self.active_registry_entry = None;
         self.last_invocation_error = None;
         Ok("Match AI restored".to_string())
@@ -136,25 +199,50 @@ impl Controller for DirectDehumanizedController {
         params,
         ..
       } => {
-        let registry = match kind.as_str() {
-          "skill" | "skills" => SKILLS.0,
-          "play" | "plays" => PLAYS.0,
-          _ => return Err(format!("unknown registry kind: {kind}")),
-        };
-        let Some((_, factory)) = registry.iter().find(|(name, _)| *name == entry) else {
-          return Err(format!("{entry:?} is not registered in {kind}"));
-        };
-        factory
-          .validate(config, params)
-          .map_err(|error| format!("invalid {entry} values: {error}"))?;
-        self.active_registry_entry = Some(ActiveRegistryEntry {
-          name: entry.clone(),
-          factory: *factory,
-          config: config.clone(),
-          params: params.clone(),
-        });
-        self.last_invocation_error = None;
-        Ok(format!("{entry} is driving directly"))
+        #[cfg(feature = "hotreload")]
+        {
+          let response = if kind == "hotreload" {
+            self.ai.hotreload(serde_json::json!({"action": "build", "profile": config["profile"], "watch": config["watch"]}))?
+          } else {
+            self
+              .ai
+              .hotreload(serde_json::json!({"action": "activate", "invocation": {
+                "kind": kind, "entry": entry, "config": config, "params": params,
+              }}))?
+          };
+          return Ok(
+            response["message"]
+              .as_str()
+              .unwrap_or("Core updated")
+              .to_string(),
+          );
+        }
+        #[cfg(not(feature = "hotreload"))]
+        {
+          let factory = match kind.as_str() {
+            "skill" | "skills" => SKILLS
+              .iter()
+              .find(|(name, _)| *name == entry)
+              .map(|(_, f)| RegistryFactory::Skill(*f)),
+            "play" | "plays" => PLAYS
+              .iter()
+              .find(|(name, _)| *name == entry)
+              .map(|(_, f)| RegistryFactory::Play(*f)),
+            _ => return Err(format!("unknown registry kind: {kind}")),
+          }
+          .ok_or_else(|| format!("{entry:?} is not registered in {kind}"))?;
+          factory
+            .validate(config, params)
+            .map_err(|error| format!("invalid {entry} values: {error}"))?;
+          self.active_registry_entry = Some(ActiveRegistryEntry {
+            name: entry.clone(),
+            factory,
+            config: config.clone(),
+            params: params.clone(),
+          });
+          self.last_invocation_error = None;
+          Ok(format!("{entry} is driving directly"))
+        }
       }
       _ => Err("this request is handled by the match runner".to_string()),
     }
@@ -225,6 +313,7 @@ fn robots_to_dehumanized(robots: &[SimRobotState], own_team: bool) -> ai::Robots
       heading: robot.orientation.to_degrees().rem_euclid(360.0) as f32,
       angular_vel: robot.v_angular.to_degrees() as f32,
       is_goalie: own_team && robot.id == 0,
+      ..ai::RobotState::default()
     });
   }
 
@@ -284,22 +373,25 @@ fn command_to_sim(
   cfg: &simhark::RobotConfig,
   stop: bool,
 ) -> SimRobotCommand {
-  let (vx, vy, angular) = match command.pos {
+  let (vx, vy, angular) = match command.motion {
     Some(pos) => {
-      let (vx, vy) = if let Some(p) = pos.pos {
+      let (vx, vy) = if let ai::Target::Pos(p) = pos.target {
         let dx = p.x as f64 / MM_PER_M - robot.x;
         let dy = p.y as f64 / MM_PER_M - robot.y;
         let distance = dx.hypot(dy);
-        let configured_speed = pos.speed.map(f64::from).unwrap_or(DEFAULT_SPEED_MM_S);
+        let configured_speed = pos
+          .limits
+          .map(|limits| f64::from(limits.v_max))
+          .unwrap_or(DEFAULT_SPEED_MM_S);
         let stop_limit = if stop {
           dehumanized::MAX_STOP_VELOCITY as f64
         } else {
           f64::INFINITY
         };
         let max_speed_m_s = configured_speed
-            .min(stop_limit)
-            .min(cfg.vel_absolute_max * MM_PER_M)
-            / MM_PER_M;
+          .min(stop_limit)
+          .min(cfg.vel_absolute_max * MM_PER_M)
+          / MM_PER_M;
         let speed = if distance <= POSITION_TOLERANCE_M {
           0.0
         } else {
@@ -314,13 +406,15 @@ fn command_to_sim(
         (0.0, 0.0)
       };
 
-      let angular = pos
-        .face
-        .map(|face| {
-          let error = wrap_to_pi((face as f64).to_radians() - robot.orientation);
-          (error * HEADING_GAIN_PER_S).clamp(-cfg.vel_angular_max, cfg.vel_angular_max)
-        })
-        .unwrap_or(0.0);
+      let angular = match pos.heading {
+        ai::HeadingMode::Fixed(angle) => Some(angle),
+        _ => None,
+      }
+      .map(|face| {
+        let error = wrap_to_pi((face as f64).to_radians() - robot.orientation);
+        (error * HEADING_GAIN_PER_S).clamp(-cfg.vel_angular_max, cfg.vel_angular_max)
+      })
+      .unwrap_or(0.0);
       (vx, vy, angular)
     }
     None => (0.0, 0.0, 0.0),
@@ -393,9 +487,38 @@ fn stopped_command(id: usize) -> SimRobotCommand {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use core_dump::types::ai_types::{Pos, RobotCommand};
+  use core_dump::types::ai_types::{HeadingMode, Limits, MotionCommand, RobotCommand, Target};
   use simhark::BallState;
   use simhark::state::KickStatus;
+
+  #[cfg(all(feature = "viewer", feature = "hotreload"))]
+  #[test]
+  fn viewer_exposes_profiles_and_accepts_compiler_switch() {
+    let mut controller = DirectDehumanizedController::new(2);
+    let schema = controller.developer_schema().unwrap();
+    let reload = schema["tabs"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|tab| tab["id"] == "hotreload")
+      .unwrap();
+    let fields =
+      &reload["source"]["part"]["entries"][0]["source"]["part"]["sections"][0]["schema"]["fields"];
+    let options = fields[0]["ty"]["options"]["options"].as_array().unwrap();
+    assert!(options.iter().any(|option| option["value"] == "dev"));
+    assert!(options.iter().any(|option| option["value"] == "fast"));
+    let response = controller
+      .apply_developer_request(&simhark::viewer::DeveloperRequest::Activate {
+        target: "blue".into(),
+        kind: "hotreload".into(),
+        entry: "build".into(),
+        config: serde_json::json!({"profile": "fast", "watch": false}),
+        params: serde_json::json!({}),
+      })
+      .unwrap();
+    assert!(response.contains("building fast"));
+    assert!(controller.hotreload_update().unwrap().0);
+  }
 
   #[test]
   fn world_conversion_uses_mm_degrees_and_team_order() {
@@ -418,10 +541,17 @@ mod tests {
     let mut commands = Commands::default();
     commands[0] = Some(RobotCommand {
       dribbler: true,
-      pos: Some(Pos {
-        pos: Vec2::new(2_000.0, -250.0),
-        face: Some(90.0),
-        speed: Some(500),
+      motion: Some(MotionCommand {
+        target: Target::Pos(Vec2::new(2_000.0, -250.0)),
+        heading: HeadingMode::Fixed(90.0),
+        limits: Some(Limits {
+          v_max: 500.0,
+          a_max: 0.0,
+          omega_max: 0.0,
+          alpha_max: 0.0,
+          jerk: 0.0,
+        }),
+        ..MotionCommand::default()
       }),
       kicker: Kicker::Kick(2_000.0),
       ..RobotCommand::default()

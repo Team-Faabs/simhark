@@ -165,7 +165,7 @@ export interface DeveloperResult {
 }
 
 export interface DeveloperSnapshot {
-  schema: import("@dehumanized/schema-renderer").RendererSchema & {
+  schema: import("@faabs/schema-renderer").RendererSchema & {
     matchControls?: MatchDeveloperControls;
   };
   results: Record<string, DeveloperResult>;
@@ -175,8 +175,8 @@ export interface MatchDeveloperControls {
   availableAis: Array<{ id: string; label: string }>;
   blueAi: string | null;
   yellowAi: string | null;
-  blueDeveloperSchema: import("@dehumanized/schema-renderer").RendererSchema | null;
-  yellowDeveloperSchema: import("@dehumanized/schema-renderer").RendererSchema | null;
+  blueDeveloperSchema: import("@faabs/schema-renderer").RendererSchema | null;
+  yellowDeveloperSchema: import("@faabs/schema-renderer").RendererSchema | null;
   teleportBallOnNoProgress: boolean;
 }
 
@@ -186,8 +186,8 @@ export type DeveloperRequest =
       target: string;
       kind: string;
       entry: string;
-      config: import("@dehumanized/schema-renderer").JsonObject;
-      params: import("@dehumanized/schema-renderer").JsonObject;
+      config: import("@faabs/schema-renderer").JsonObject;
+      params: import("@faabs/schema-renderer").JsonObject;
     }
   | {
       action: "disable";
@@ -206,6 +206,7 @@ export type DeveloperRequest =
 
 export interface ViewerFrame {
   world_count: number;
+  world_names?: string[];
   selected_world: number;
   selected_worlds?: number[];
   field: FieldConfig;

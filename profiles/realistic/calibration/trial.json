@@ -1,0 +1,12 @@
+{
+  "hardware_id": "REPLACE-robot-and-profile-revision",
+  "scenario": "REPLACE-braking-slip-trip-tilt-or-sensor-scenario",
+  "build_id": "REPLACE-simulator-build",
+  "measured": [],
+  "simulated": [],
+  "tolerance": 0.0,
+  "units": "REPLACE-SI-units",
+  "boundary": "REPLACE-exact-measured-observable-and-alignment",
+  "held_out": true,
+  "dataset_sha256": "REPLACE-canonical-recording-SHA256"
+}

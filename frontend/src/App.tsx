@@ -322,6 +322,7 @@ export default function App() {
               />
               <WorldSelector
                 worldCount={frame?.world_count ?? 0}
+                worldNames={frame?.world_names}
                 selected={selectedWorlds}
                 suite={frame?.test_suite ?? null}
                 onSelect={selectWorlds}

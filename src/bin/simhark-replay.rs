@@ -22,10 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       eprintln!("usage:");
       eprintln!("  simhark-replay record-demo <out.shreplay> [worlds] [steps]");
       eprintln!(
-        "  simhark-replay serve <file.shreplay|ssl.log|ssl.log.gz> [--viewer-port PORT] [--vision2014]"
+        "  simhark-replay serve <file.shreplay|ssl.log|ssl.log.gz> [--viewer-port PORT] [--vision2014|--compare-trackers]"
       );
       eprintln!(
-        "    note: SSL log replay uses only VisionTracker2020 by default; pass --vision2014 for raw SSL-Vision packets."
+        "    note: --compare-trackers shows raw SSL-Vision with every VisionTracker2020 source as colored holo robots."
       );
       std::process::exit(2);
     }
@@ -73,10 +73,13 @@ fn record_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
   let options = ServeOptions::parse(args)?;
   let path = options.path.as_path();
-  let replay = if path.extension().is_some_and(|ext| ext == "shreplay") {
-    ReplayLog::read_zstd(path)?
+  let compare_trackers = !path.extension().is_some_and(|ext| ext == "shreplay")
+    && matches!(options.vision_source, VisionLogSource::CompareTrackers);
+  let (replay, world_names) = if path.extension().is_some_and(|ext| ext == "shreplay") {
+    (ReplayLog::read_zstd(path)?, None)
   } else {
-    ssl_log_to_replay(path, options.vision_source)?
+    let (replay, names) = ssl_log_to_replay(path, options.vision_source)?;
+    (replay, Some(names))
   };
   if replay.frames.is_empty() {
     return Err("replay contains no frames".into());
@@ -91,6 +94,13 @@ fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     replay.metadata.world_count,
     &replay.metadata.world_config,
   )?;
+  if let Some(names) = world_names {
+    println!("Worlds: {}", names.join(", "));
+    viewer.set_world_names(names);
+  }
+  if compare_trackers {
+    viewer.select_all_worlds();
+  }
   viewer.enable_web_control();
   println!("Viewer: {}", config.http_url());
   println!(
@@ -155,6 +165,7 @@ fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 enum VisionLogSource {
   Tracker2020,
   Vision2014,
+  CompareTrackers,
 }
 
 struct ServeOptions {
@@ -180,6 +191,10 @@ impl ServeOptions {
         }
         "--vision2014" | "--raw-vision" => {
           vision_source = VisionLogSource::Vision2014;
+          i += 1;
+        }
+        "--compare-trackers" | "--compare-vision" => {
+          vision_source = VisionLogSource::CompareTrackers;
           i += 1;
         }
         value if value.starts_with("--") => {
@@ -214,25 +229,52 @@ fn apply_frame_step(index: usize, step: isize, len: usize) -> usize {
 fn ssl_log_to_replay(
   path: &Path,
   vision_source: VisionLogSource,
-) -> Result<ReplayLog, Box<dyn std::error::Error>> {
+) -> Result<(ReplayLog, Vec<String>), Box<dyn std::error::Error>> {
   let mut reader = LogReader::open(path)?;
   let mut config = WorldConfig::division_a();
   let mut frames = Vec::new();
   let mut events = Vec::new();
   let mut first_capture = None::<f64>;
+  let mut first_compare_receive = None::<f64>;
   let mut last_command_counter = None::<u32>;
   let mut tracker = VisionTracker::default();
+  let mut tracker_samples = HashMap::<String, Vec<TrackerSample>>::new();
+  let mut tracker_names = HashMap::<String, String>::new();
+  let mut camera_samples = HashMap::<u32, Vec<CameraSample>>::new();
+  let mut comparison_event_times = Vec::<(usize, f64)>::new();
 
   while let Some(message) = reader.next_message()? {
+    let receive_time = message.timestamp_secs();
     match message.message_id {
-      MessageId::VisionTracker2020 if matches!(vision_source, VisionLogSource::Tracker2020) => {
+      MessageId::VisionTracker2020 => {
         let Ok(wrapper) = loguna::proto::TrackerWrapperPacket::decode(message.payload.as_slice())
         else {
           continue;
         };
+        let source_name = wrapper
+          .source_name
+          .filter(|name| !name.is_empty())
+          .unwrap_or_else(|| short_source_id(&wrapper.uuid));
+        let source_id = tracker_source_id(&wrapper.uuid, &source_name);
         let Some(tracked_frame) = wrapper.tracked_frame else {
           continue;
         };
+        if matches!(vision_source, VisionLogSource::CompareTrackers) {
+          tracker_names
+            .entry(source_id.clone())
+            .or_insert(source_name);
+          tracker_samples
+            .entry(source_id)
+            .or_default()
+            .push(TrackerSample {
+              receive_time,
+              frame: tracked_frame,
+            });
+          continue;
+        }
+        if !matches!(vision_source, VisionLogSource::Tracker2020) {
+          continue;
+        }
         let base = *first_capture.get_or_insert(tracked_frame.timestamp);
         let sim_time = (tracked_frame.timestamp - base).max(0.0);
         let frame_number = tracked_frame.frame_number as u64;
@@ -249,8 +291,11 @@ fn ssl_log_to_replay(
           events: Vec::new(),
         });
       }
-      MessageId::Vision2014 | MessageId::Vision2010 => {
-        if !matches!(vision_source, VisionLogSource::Vision2014) {
+      MessageId::Vision2014 => {
+        if !matches!(
+          vision_source,
+          VisionLogSource::Vision2014 | VisionLogSource::CompareTrackers
+        ) {
           continue;
         }
         let Ok(wrapper) = loguna::proto::SslWrapperPacket::decode(message.payload.as_slice())
@@ -263,10 +308,33 @@ fn ssl_log_to_replay(
         let Some(detection) = wrapper.detection else {
           continue;
         };
+        let frame_number = detection.frame_number as u64;
+        if matches!(vision_source, VisionLogSource::CompareTrackers) {
+          first_compare_receive.get_or_insert(receive_time);
+          camera_samples
+            .entry(detection.camera_id)
+            .or_default()
+            .push(CameraSample {
+              receive_time,
+              detection: detection.clone(),
+            });
+          continue;
+        }
         let base = *first_capture.get_or_insert(detection.t_capture);
         let sim_time = (detection.t_capture - base).max(0.0);
-        let frame_number = detection.frame_number as u64;
-        let state = tracker.detection_to_state(&detection, frame_number, sim_time);
+        let mut state = tracker.detection_to_state(&detection, frame_number, sim_time);
+        // World zero is the unfiltered camera measurement. Tracker estimates are
+        // appended as additional worlds after the complete log has been read.
+        state.blue_robots = detection
+          .robots_blue
+          .iter()
+          .map(|robot| detection_robot(robot, TeamColor::Blue))
+          .collect();
+        state.yellow_robots = detection
+          .robots_yellow
+          .iter()
+          .map(|robot| detection_robot(robot, TeamColor::Yellow))
+          .collect();
         frames.push(ReplayFrame {
           frame: frame_number,
           sim_time,
@@ -284,10 +352,16 @@ fn ssl_log_to_replay(
           .map(|command| command.as_str_name().to_string())
           .unwrap_or_else(|_| format!("COMMAND_{}", referee.command));
         if last_command_counter != Some(referee.command_counter) {
-          let sim_time = frames.last().map_or(0.0, |frame| frame.sim_time);
+          let compare = matches!(vision_source, VisionLogSource::CompareTrackers);
+          let sim_time = if compare {
+            receive_time
+          } else {
+            frames.last().map_or(0.0, |frame| frame.sim_time)
+          };
           let stage = loguna::proto::referee::Stage::try_from(referee.stage)
             .map(|stage| stage.as_str_name().to_string())
             .unwrap_or_else(|_| format!("STAGE_{}", referee.stage));
+          let event_index = events.len();
           events.push(ReplayEvent {
             frame: frames.len() as u64,
             sim_time,
@@ -299,6 +373,9 @@ fn ssl_log_to_replay(
               referee.command_counter, stage, referee.blue.name, referee.yellow.name
             )),
           });
+          if compare {
+            comparison_event_times.push((event_index, receive_time));
+          }
           last_command_counter = Some(referee.command_counter);
         }
       }
@@ -306,17 +383,263 @@ fn ssl_log_to_replay(
     }
   }
 
+  let world_names = if matches!(vision_source, VisionLogSource::CompareTrackers) {
+    for samples in tracker_samples.values_mut() {
+      samples.sort_by(|a, b| a.receive_time.total_cmp(&b.receive_time));
+    }
+    for samples in camera_samples.values_mut() {
+      samples.sort_by(|a, b| a.receive_time.total_cmp(&b.receive_time));
+      samples.dedup_by(|next, previous| {
+        next.detection.frame_number == previous.detection.frame_number
+          && (next.receive_time - previous.receive_time).abs() < 0.005
+      });
+    }
+    let compare_base = first_compare_receive.unwrap_or(0.0);
+    frames = comparison_timeline(&camera_samples, compare_base);
+    align_comparison_events(&mut events, &comparison_event_times, &frames, compare_base);
+    add_comparison_worlds(
+      &mut frames,
+      &camera_samples,
+      &tracker_samples,
+      &tracker_names,
+      compare_base,
+    )
+  } else {
+    vec![match vision_source {
+      VisionLogSource::Tracker2020 => "tracked vision".to_string(),
+      VisionLogSource::Vision2014 => "raw vision".to_string(),
+      VisionLogSource::CompareTrackers => unreachable!(),
+    }]
+  };
+
   let tick_hz = estimate_tick_hz(&frames).unwrap_or(60.0);
-  Ok(ReplayLog {
-    metadata: ReplayMetadata {
-      world_count: 1,
-      world_config: config,
-      tick_hz,
-      source: path.display().to_string(),
+  Ok((
+    ReplayLog {
+      metadata: ReplayMetadata {
+        world_count: world_names.len(),
+        world_config: config,
+        tick_hz,
+        source: path.display().to_string(),
+      },
+      frames,
+      events,
     },
-    frames,
-    events,
-  })
+    world_names,
+  ))
+}
+
+struct TrackerSample {
+  receive_time: f64,
+  frame: loguna::proto::TrackedFrame,
+}
+
+struct CameraSample {
+  receive_time: f64,
+  detection: loguna::proto::SslDetectionFrame,
+}
+
+fn comparison_timeline(
+  camera_samples: &HashMap<u32, Vec<CameraSample>>,
+  time_base: f64,
+) -> Vec<ReplayFrame> {
+  let Some((_, timeline)) = camera_samples
+    .iter()
+    .min_by_key(|(camera_id, _)| *camera_id)
+  else {
+    return Vec::new();
+  };
+  timeline
+    .iter()
+    .map(|sample| ReplayFrame {
+      frame: sample.detection.frame_number as u64,
+      sim_time: (sample.receive_time - time_base).max(0.0),
+      states: Vec::new(),
+      commands: vec![WorldCommand::default()],
+      debug: Vec::new(),
+      events: Vec::new(),
+    })
+    .collect()
+}
+
+fn align_comparison_events(
+  events: &mut [ReplayEvent],
+  event_times: &[(usize, f64)],
+  frames: &[ReplayFrame],
+  time_base: f64,
+) {
+  for &(event_index, receive_time) in event_times {
+    let Some(event) = events.get_mut(event_index) else {
+      continue;
+    };
+    event.sim_time = (receive_time - time_base).max(0.0);
+    event.frame = frames
+      .partition_point(|frame| frame.sim_time <= event.sim_time)
+      .saturating_sub(1) as u64;
+  }
+}
+
+fn add_comparison_worlds(
+  frames: &mut [ReplayFrame],
+  camera_samples: &HashMap<u32, Vec<CameraSample>>,
+  tracker_samples: &HashMap<String, Vec<TrackerSample>>,
+  tracker_names: &HashMap<String, String>,
+  raw_time_base: f64,
+) -> Vec<String> {
+  let mut cameras = camera_samples.keys().copied().collect::<Vec<_>>();
+  cameras.sort_unstable();
+  let mut trackers = tracker_samples.keys().collect::<Vec<_>>();
+  trackers.sort_by_key(|id| (tracker_names.get(*id), *id));
+  for frame in frames {
+    let timestamp = raw_time_base + frame.sim_time;
+    frame.states.clear();
+    for (camera_index, camera_id) in cameras.iter().enumerate() {
+      let Some(sample) = nearest_camera_sample(&camera_samples[camera_id], timestamp) else {
+        continue;
+      };
+      if (sample.receive_time - timestamp).abs() > 0.25 {
+        continue;
+      }
+      frame.states.push(raw_detection_to_state(
+        &sample.detection,
+        camera_index,
+        frame.frame,
+        frame.sim_time,
+      ));
+    }
+    for (tracker_index, source_id) in trackers.iter().enumerate() {
+      let Some(sample) = nearest_tracker_sample(&tracker_samples[*source_id], timestamp) else {
+        continue;
+      };
+      // Tracker-provided timestamps may use unrelated clock domains. Loguna's
+      // envelope receive time is the common clock for every recorded source.
+      if (sample.receive_time - timestamp).abs() > 0.25 {
+        continue;
+      }
+      let mut state = tracked_frame_to_state(&sample.frame, frame.frame, frame.sim_time);
+      state.world_id = cameras.len() + tracker_index;
+      frame.states.push(state);
+    }
+  }
+  cameras
+    .into_iter()
+    .map(|camera_id| format!("raw vision camera {camera_id}"))
+    .chain(trackers.into_iter().map(|source_id| {
+      tracker_names
+        .get(source_id)
+        .cloned()
+        .unwrap_or_else(|| short_source_id(source_id))
+    }))
+    .collect()
+}
+
+fn nearest_camera_sample(samples: &[CameraSample], timestamp: f64) -> Option<&CameraSample> {
+  let after = samples.partition_point(|sample| sample.receive_time < timestamp);
+  nearest_by_receive_time(samples, after, timestamp, |sample| sample.receive_time)
+}
+
+fn nearest_tracker_sample(samples: &[TrackerSample], timestamp: f64) -> Option<&TrackerSample> {
+  let after = samples.partition_point(|sample| sample.receive_time < timestamp);
+  nearest_by_receive_time(samples, after, timestamp, |sample| sample.receive_time)
+}
+
+fn nearest_by_receive_time<T>(
+  samples: &[T],
+  after: usize,
+  timestamp: f64,
+  receive_time: impl Fn(&T) -> f64,
+) -> Option<&T> {
+  match (after.checked_sub(1), samples.get(after)) {
+    (Some(before), Some(next)) => {
+      let previous = &samples[before];
+      if timestamp - receive_time(previous) <= receive_time(next) - timestamp {
+        Some(previous)
+      } else {
+        Some(next)
+      }
+    }
+    (Some(before), None) => samples.get(before),
+    (None, next) => next,
+  }
+}
+
+fn raw_detection_to_state(
+  detection: &loguna::proto::SslDetectionFrame,
+  world_id: usize,
+  frame: u64,
+  sim_time: f64,
+) -> simhark::WorldState {
+  let ball = detection.balls.first().map_or(
+    BallState {
+      x: 0.0,
+      y: 0.0,
+      z: 0.0,
+      vx: 0.0,
+      vy: 0.0,
+      vz: 0.0,
+    },
+    |ball| BallState {
+      x: ball.x as f64 / 1000.0,
+      y: ball.y as f64 / 1000.0,
+      z: ball.z.unwrap_or(0.0) as f64 / 1000.0,
+      vx: 0.0,
+      vy: 0.0,
+      vz: 0.0,
+    },
+  );
+  simhark::WorldState {
+    world_id,
+    sim_time,
+    frame,
+    ball,
+    blue_robots: detection
+      .robots_blue
+      .iter()
+      .map(|robot| detection_robot(robot, TeamColor::Blue))
+      .collect(),
+    yellow_robots: detection
+      .robots_yellow
+      .iter()
+      .map(|robot| detection_robot(robot, TeamColor::Yellow))
+      .collect(),
+    goal_blue: false,
+    goal_yellow: false,
+  }
+}
+
+fn short_source_id(id: &str) -> String {
+  if id.is_empty() {
+    "unnamed tracker".to_string()
+  } else {
+    format!("tracker {}", id.chars().take(8).collect::<String>())
+  }
+}
+
+fn tracker_source_id(uuid: &str, source_name: &str) -> String {
+  // Some recorded logs reuse a UUID across independently produced tracker
+  // streams. The source name is therefore part of the identity even when a
+  // UUID is present; otherwise those streams get interleaved into one world.
+  format!("name:{source_name}\0uuid:{uuid}")
+}
+
+#[cfg(test)]
+mod tracker_source_tests {
+  use super::tracker_source_id;
+
+  #[test]
+  fn same_uuid_with_different_names_stays_separate() {
+    assert_ne!(
+      tracker_source_id("shared", "TIGERs Mannheim"),
+      tracker_source_id("shared", "ER-Force")
+    );
+  }
+
+  #[test]
+  fn same_name_with_different_uuids_stays_separate() {
+    assert_ne!(
+      tracker_source_id("first", "tracker"),
+      tracker_source_id("second", "tracker")
+    );
+  }
 }
 
 fn tracked_frame_to_state(

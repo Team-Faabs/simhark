@@ -1,0 +1,1052 @@
+schema_version = 1
+profile_layers = []
+physics_step_ns = 250000
+control_rate_hz = 1000
+publication_rate_hz = 1000
+ai_rate_hz = 60
+ai_processing_ns = 1000000
+command_ttl_ns = 50000000
+watchdog_ns = 100000000
+max_pending_events = 100000
+record_raw_sensors = false
+record_raw_packets = false
+robot_overrides = []
+camera_timing_priors = []
+external_vision = false
+
+[provenance]
+classification = "provisional"
+source = "Exploratory surrogate; no assembled-robot measurements"
+owner = "teamfaabs"
+
+[parameter_provenance]
+
+[known_calibration]
+x16_mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[ai_processing]
+queued_capacity = 1
+overload = "latest"
+
+[ai_processing.extra_service]
+kind = "constant"
+delay_ns = 0
+
+[transport]
+joint_delay_trace = []
+superframe_ns = 1000000
+guard_ns = 20000
+wifi_delay_trace_ns = [1000000]
+uwb_host_delay_trace_ns = [100000]
+common_delay_trace_ns = [0]
+
+[[transport.slots]]
+every_superframes = 1
+phase_superframe = 0
+offset_ns = 0
+occupied_ns = 200000
+purpose = "blue_command"
+
+[[transport.slots]]
+every_superframes = 1
+phase_superframe = 0
+offset_ns = 250000
+occupied_ns = 200000
+purpose = "yellow_command"
+
+[[transport.slots]]
+every_superframes = 2
+phase_superframe = 0
+offset_ns = 500000
+occupied_ns = 400000
+purpose = "ranging"
+
+[[transport.slots]]
+every_superframes = 2
+phase_superframe = 1
+offset_ns = 500000
+occupied_ns = 300000
+purpose = "telemetry"
+
+[transport.command_format]
+header_bytes = 8
+bytes_per_robot = 8
+bitrate_bits_per_second = 6800000
+preamble_and_phy_header_ns = 80000
+
+[motor]
+supply_voltage_v = 12.0
+resistance_ohm = 2.0
+inductance_h = 0.001
+torque_constant_nm_per_a = 0.025
+back_emf_v_per_rad_s = 0.025
+wheel_inertia_kg_m2 = 0.0002
+viscous_drag_nm_per_rad_s = 0.0001
+speed_gain_v_per_rad_s = 0.2
+trip_current_a = 8.0
+trip_current_type = "phase_peak"
+current_filter_time_constant_s = 0.002
+fault_scope = "motor"
+trip_exposure_ns = 500000
+reset_duration_ns = 10000000
+peak_margin_a = 0.0
+encoder_ticks_per_revolution = 2048
+
+[motor_adc]
+enabled = false
+rate_hz = 20000
+delivery_ns = 10000
+current_resolution_a = 0.001
+current_noise_std_a = 0.002
+current_range_a = 12.0
+voltage_resolution_v = 0.01
+
+[contact]
+friction = 0.8
+slip_stiffness_n_per_m_s = 25.0
+center_of_mass_height_m = 0.05
+load_transfer_time_constant_s = 0.02
+
+# Venue/carpet properties, independent of the wheel material.
+# Grip scales multiply wheel friction. Slip compliances add to wheel compliance.
+[contact.floor]
+longitudinal_grip_scale = 1.0
+transverse_grip_scale = 1.0
+longitudinal_slip_compliance_m_s_per_n = 0.0
+transverse_slip_compliance_m_s_per_n = 0.0
+rolling_resistance_scale = 1.0
+
+[imu]
+rate_hz = 1920
+phase_ns = 0
+odr_error_ppm = 0
+fifo_watermark = 4
+delivery_delay_ns = 200000
+filter_time_constant_s = 0.001
+gyro_noise_density_rad_s_sqrt_hz = 0.00005
+accel_noise_density_m_s2_sqrt_hz = 0.0006
+gyro_bias_rad_s = [
+    0.0,
+    0.0,
+    0.0,
+]
+accel_bias_m_s2 = [
+    0.0,
+    0.0,
+    0.0,
+]
+gyro_range_rad_s = 35.0
+accel_range_m_s2 = 78.48
+position_body_m = [
+    0.0,
+    0.0,
+    0.0,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[vision]
+rate_hz = 60
+delay_ns = 15000000
+position_noise_std_m = 0.002
+orientation_noise_std_rad = 0.005
+dropout_probability = 0.0
+
+[hardware]
+dynamics = "free3d"
+# Total robot mass (including kicker), kg. CoM is relative to the chassis origin.
+# Body axes: x forward, y left, z up; origin is start_z = height/2 + wheel_radius.
+mass_kg = 2.02
+center_of_mass_body_m = [0.0, 0.0, -0.0505]
+support_stiffness_n_m = 25000.0
+support_damping_n_s_m = 120.0
+rolling_resistance = 0.01
+transverse_friction = 0.04
+
+# Along the driven wheel direction versus across the passive rollers.
+[hardware.wheel]
+longitudinal_friction = 0.8
+transverse_friction = 0.04
+longitudinal_slip_stiffness_n_per_m_s = 25.0
+transverse_slip_stiffness_n_per_m_s = 25.0
+rolling_resistance = 0.01
+
+[hardware.battery]
+enabled = true
+capacity_coulomb = 7200.0
+open_circuit_voltage_v = 12.0
+internal_resistance_ohm = 0.08
+brownout_voltage_v = 8.0
+recovery_voltage_v = 9.0
+restart_ns = 100000000
+electronics_power_w = 8.0
+thermal_capacity_j_k = 100.0
+cooling_w_k = 0.2
+ambient_temperature_c = 25.0
+motor_thermal_capacity_j_k = 15.0
+motor_cooling_w_k = 0.3
+motor_shutdown_temperature_c = 100.0
+regenerative = false
+
+[hardware.auxiliaries]
+kick_charge_time_ns = 1000000000
+kick_delay_ns = 2000000
+kick_energy_j = 8.0
+dribbler_time_constant_s = 0.04
+dribbler_power_w = 6.0
+dribbler_pull_n = 0.3
+dribbler_max_force_n = 1.0
+dribbler_stiffness_n_m = 30.0
+dribbler_damping_n_s_m = 0.15
+dribbler_spin_torque_nm = 0.001
+charging_power_w = 10.0
+ir_delay_ns = 1000000
+ir_debounce_ns = 1000000
+
+[[devices.imus]]
+stream = "x16"
+scale_error = [
+    0.0,
+    0.0,
+    0.0,
+]
+cross_axis = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+quantization_step = 0.0
+temperature_bias_per_c = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_amplitude = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_frequency_hz = 0.0
+faults = []
+
+[devices.imus.physical]
+rate_hz = 1920
+phase_ns = 0
+odr_error_ppm = 0
+fifo_watermark = 4
+delivery_delay_ns = 0
+filter_time_constant_s = 0.001
+gyro_noise_density_rad_s_sqrt_hz = 0.00005
+accel_noise_density_m_s2_sqrt_hz = 0.0006
+gyro_bias_rad_s = [
+    0.0,
+    0.0,
+    0.0,
+]
+accel_bias_m_s2 = [
+    0.0,
+    0.0,
+    0.0,
+]
+gyro_range_rad_s = 35.0
+accel_range_m_s2 = 78.48
+position_body_m = [
+    0.0,
+    0.0,
+    0.0,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[devices.imus.timing]
+source = "sample_count"
+interrupt_delay_ns = 1000
+kernel_capture_jitter_ns = 1000
+wakeup_trace_ns = [100000]
+bus_transaction_ns = 100000
+timestamp_uncertainty_ns = 100000
+
+[devices.imus.timing.clock]
+tick_hz = 1000000
+counter_bits = 32
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[devices.imus]]
+stream = "bmi_gyro"
+scale_error = [
+    0.0,
+    0.0,
+    0.0,
+]
+cross_axis = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+quantization_step = 0.0
+temperature_bias_per_c = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_amplitude = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_frequency_hz = 0.0
+faults = []
+
+[devices.imus.physical]
+rate_hz = 1000
+phase_ns = 0
+odr_error_ppm = 0
+fifo_watermark = 4
+delivery_delay_ns = 0
+filter_time_constant_s = 0.0025
+gyro_noise_density_rad_s_sqrt_hz = 0.000244
+accel_noise_density_m_s2_sqrt_hz = 0.0006
+gyro_bias_rad_s = [
+    0.0,
+    0.0,
+    0.0,
+]
+accel_bias_m_s2 = [
+    0.0,
+    0.0,
+    0.0,
+]
+gyro_range_rad_s = 35.0
+accel_range_m_s2 = 78.48
+position_body_m = [
+    0.03,
+    0.0,
+    0.0,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[devices.imus.timing]
+source = "sample_count"
+interrupt_delay_ns = 1000
+kernel_capture_jitter_ns = 1000
+wakeup_trace_ns = [100000]
+bus_transaction_ns = 100000
+timestamp_uncertainty_ns = 100000
+
+[devices.imus.timing.clock]
+tick_hz = 1000000
+counter_bits = 32
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[devices.imus]]
+stream = "bmi_accel"
+scale_error = [
+    0.0,
+    0.0,
+    0.0,
+]
+cross_axis = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+quantization_step = 0.0
+temperature_bias_per_c = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_amplitude = [
+    0.0,
+    0.0,
+    0.0,
+]
+vibration_frequency_hz = 0.0
+faults = []
+
+[devices.imus.physical]
+rate_hz = 1600
+phase_ns = 0
+odr_error_ppm = 0
+fifo_watermark = 4
+delivery_delay_ns = 0
+filter_time_constant_s = 0.0011
+gyro_noise_density_rad_s_sqrt_hz = 0.000244
+accel_noise_density_m_s2_sqrt_hz = 0.0006
+gyro_bias_rad_s = [
+    0.0,
+    0.0,
+    0.0,
+]
+accel_bias_m_s2 = [
+    0.0,
+    0.0,
+    0.0,
+]
+gyro_range_rad_s = 35.0
+accel_range_m_s2 = 58.84
+position_body_m = [
+    0.03,
+    0.0,
+    0.0,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[devices.imus.timing]
+source = "sample_count"
+interrupt_delay_ns = 1000
+kernel_capture_jitter_ns = 1000
+wakeup_trace_ns = [100000]
+bus_transaction_ns = 100000
+timestamp_uncertainty_ns = 100000
+
+[devices.imus.timing.clock]
+tick_hz = 1000000
+counter_bits = 32
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[devices.magnetometer]
+ambient_gradient_ut_per_m = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+motor_dipoles = []
+dribbler_field_ut = [
+    0.0,
+    0.0,
+    0.0,
+]
+charging_field_ut = [
+    0.0,
+    0.0,
+    0.0,
+]
+enabled = true
+rate_hz = 100
+position_body_m = [
+    0.0,
+    0.0,
+    0.0,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+earth_field_world_ut = [
+    20.0,
+    0.0,
+    40.0,
+]
+hard_iron_ut = [
+    0.0,
+    0.0,
+    0.0,
+]
+soft_iron = [
+    [
+    1.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    1.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    1.0,
+],
+]
+current_field_ut_per_a = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+rotor_field_ut = [
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+    [
+    0.0,
+    0.0,
+    0.0,
+],
+]
+rotor_harmonic = 1
+noise_std_ut = 0.1
+range_ut = 1500.0
+delay_ns = 1000000
+
+[[cameras]]
+id = 0
+rate_hz = 60
+phase_ns = 0
+position_world_m = [
+    -2.5,
+    0.0,
+    5.0,
+]
+camera_to_world_rpy_rad = [
+    3.141592653589793,
+    0.0,
+    0.0,
+]
+width = 1920
+height = 1200
+focal_px = [
+    900.0,
+    900.0,
+]
+principal_px = [
+    960.0,
+    600.0,
+]
+distortion = [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_position_error_m = [
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_rpy_error_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_focal_fraction_error = [
+    0.0,
+    0.0,
+]
+pixel_noise_std = 0.3
+persistent_position_bias_m = [
+    0.0,
+    0.0,
+]
+spatial_error_m_per_m = [
+    0.0,
+    0.0,
+]
+drift_m_per_s = [
+    0.0,
+    0.0,
+]
+correlated_noise_tau_s = 0.02
+dropout_probability = 0.0
+id_swap_probability = 0.0
+heading_flip_probability = 0.0
+false_detection_probability = 0.0
+exposure_ns = 1000000
+readout_ns = 1000000
+rolling_shutter = false
+acquisition_delay_ns = 1000000
+processing_ns = 8000000
+network_delay_ns = 1000000
+blue_enabled = true
+yellow_enabled = true
+officials_enabled = true
+
+[cameras.clock]
+tick_hz = 1000000
+counter_bits = 32
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[cameras]]
+id = 1
+rate_hz = 60
+phase_ns = 8000000
+position_world_m = [
+    2.5,
+    0.0,
+    5.0,
+]
+camera_to_world_rpy_rad = [
+    3.141592653589793,
+    0.0,
+    0.0,
+]
+width = 1920
+height = 1200
+focal_px = [
+    900.0,
+    900.0,
+]
+principal_px = [
+    960.0,
+    600.0,
+]
+distortion = [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_position_error_m = [
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_rpy_error_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+calibration_focal_fraction_error = [
+    0.0,
+    0.0,
+]
+pixel_noise_std = 0.3
+persistent_position_bias_m = [
+    0.0,
+    0.0,
+]
+spatial_error_m_per_m = [
+    0.0,
+    0.0,
+]
+drift_m_per_s = [
+    0.0,
+    0.0,
+]
+correlated_noise_tau_s = 0.02
+dropout_probability = 0.0
+id_swap_probability = 0.0
+heading_flip_probability = 0.0
+false_detection_probability = 0.0
+exposure_ns = 1000000
+readout_ns = 1000000
+rolling_shutter = false
+acquisition_delay_ns = 1000000
+processing_ns = 8000000
+network_delay_ns = 1000000
+blue_enabled = true
+yellow_enabled = true
+officials_enabled = true
+
+[cameras.clock]
+tick_hz = 1000000
+counter_bits = 32
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[tracker]
+processing_ns = 1000000
+measurement_variance_m2 = 0.0001
+acceleration_variance = 4.0
+max_age_ns = 200000000
+gate_sigma = 8.0
+initial_velocity_variance = 100.0
+
+[camera_processing]
+queued_capacity = 1
+overload = "latest"
+
+[camera_processing.extra_service]
+kind = "constant"
+delay_ns = 0
+
+[tracker_processing]
+queued_capacity = 1
+overload = "latest"
+
+[tracker_processing.extra_service]
+kind = "constant"
+delay_ns = 0
+
+[network]
+empirical_commands = false
+bulk = []
+wifi_copy_every_publications = 0
+
+[network.wifi]
+bits_per_second = 54000000
+overhead_bytes = 80
+capacity_bytes = 1000000
+retry_probability = 0.0
+retry_limit = 3
+turnaround_ns = 20000
+power_save_interval_ns = 0
+policy = "latest"
+command_priority = true
+
+[network.wifi.latency]
+kind = "constant"
+delay_ns = 100000
+
+[network.lan]
+bits_per_second = 1000000000
+overhead_bytes = 80
+capacity_bytes = 1000000
+retry_probability = 0.0
+retry_limit = 3
+turnaround_ns = 20000
+power_save_interval_ns = 0
+policy = "latest"
+command_priority = true
+
+[network.lan.latency]
+kind = "constant"
+delay_ns = 50000
+
+[environment]
+legacy_field_colliders = false
+standard_goals = true
+physical = []
+
+[[environment.known_map]]
+min_m = [
+    -4.68,
+    -0.51,
+    0.0,
+]
+max_m = [
+    -4.5,
+    -0.49,
+    0.16,
+]
+reflectivity = 0.6
+
+[[environment.known_map]]
+min_m = [
+    -4.68,
+    0.49,
+    0.0,
+]
+max_m = [
+    -4.5,
+    0.51,
+    0.16,
+]
+reflectivity = 0.6
+
+[[environment.known_map]]
+min_m = [
+    -4.6899999999999995,
+    -0.5,
+    0.0,
+]
+max_m = [
+    -4.67,
+    0.5,
+    0.16,
+]
+reflectivity = 0.25
+
+[[environment.known_map]]
+min_m = [
+    -4.51,
+    -0.5,
+    0.14,
+]
+max_m = [
+    -4.49,
+    0.5,
+    0.16,
+]
+reflectivity = 0.6
+
+[[environment.known_map]]
+min_m = [
+    4.5,
+    -0.51,
+    0.0,
+]
+max_m = [
+    4.68,
+    -0.49,
+    0.16,
+]
+reflectivity = 0.6
+
+[[environment.known_map]]
+min_m = [
+    4.5,
+    0.49,
+    0.0,
+]
+max_m = [
+    4.68,
+    0.51,
+    0.16,
+]
+reflectivity = 0.6
+
+[[environment.known_map]]
+min_m = [
+    4.67,
+    -0.5,
+    0.0,
+]
+max_m = [
+    4.6899999999999995,
+    0.5,
+    0.16,
+]
+reflectivity = 0.25
+
+[[environment.known_map]]
+min_m = [
+    4.49,
+    -0.5,
+    0.14,
+]
+max_m = [
+    4.51,
+    0.5,
+    0.16,
+]
+reflectivity = 0.6
+
+[lidar]
+enabled = true
+scan_rate_hz = 10
+beams = 360
+position_body_m = [
+    0.0,
+    0.0,
+    -0.03,
+]
+mounting_rpy_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+min_range_m = 0.05
+max_range_m = 12.0
+range_resolution_m = 0.001
+range_noise_std_m = 0.005
+angular_resolution_rad = 0.0
+divergence_rad = 0.003
+dropout_probability = 0.0
+delivery_ns = 1000000
+
+[uwb]
+tx_firmware_delay_ns = 0
+slot_jitter_ns = 0
+require_sync_for_commands = true
+command_clock_uncertainty_ns = 0
+enabled = true
+protocol = "double_sided"
+turnaround_ns = 20000
+frame_airtime_ns = 110000
+host_delay_ns = 100000
+ranging_payload_bytes = 16
+telemetry_payload_bytes = 48
+range_noise_std_m = 0.05
+nlos_bias_m = 0.3
+loss_probability = 0.0
+antenna_delay_ns = 0.0
+assumed_antenna_delay_ns = 0.0
+bearing_frame = "robot_array"
+bearing_noise_std_rad = 0.03
+bearing_bias_rad = 0.0
+antenna_yaw_body_rad = 0.0
+bearing_ambiguity_pi = false
+synchronization_timeout_ns = 100000000
+
+[[uwb.anchors]]
+id = 0
+position_m = [
+    -4.5,
+    -3.0,
+    3.0,
+]
+antenna_delay_ns = 0.0
+yaw_rad = 0.0
+
+[uwb.anchors.clock]
+tick_hz = 64000000000
+counter_bits = 40
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[uwb.anchors]]
+id = 1
+position_m = [
+    -4.5,
+    3.0,
+    3.0,
+]
+antenna_delay_ns = 0.0
+yaw_rad = 0.0
+
+[uwb.anchors.clock]
+tick_hz = 64000000000
+counter_bits = 40
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[uwb.anchors]]
+id = 2
+position_m = [
+    4.5,
+    -3.0,
+    3.0,
+]
+antenna_delay_ns = 0.0
+yaw_rad = 0.0
+
+[uwb.anchors.clock]
+tick_hz = 64000000000
+counter_bits = 40
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[[uwb.anchors]]
+id = 3
+position_m = [
+    4.5,
+    3.0,
+    3.0,
+]
+antenna_delay_ns = 0.0
+yaw_rad = 0.0
+
+[uwb.anchors.clock]
+tick_hz = 64000000000
+counter_bits = 40
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[uwb.clock]
+tick_hz = 64000000000
+counter_bits = 40
+offset_ticks = 0
+skew_ppm = 0.0
+drift_ppm_per_s = 0.0
+
+[onboard_camera]
+enabled = true
+rate_hz = 30
+position_body_m = [
+    0.07,
+    0.0,
+    -0.05,
+]
+yaw_body_rad = 0.0
+horizontal_fov_rad = 1.7
+max_range_m = 5.0
+bearing_noise_std_rad = 0.005
+range_fractional_noise = 0.05
+detection_delay_ns = 5000000
+streaming = false
+stream_bytes_per_frame = 50000
+encode_delay_ns = 2000000
+decode_delay_ns = 3000000

@@ -1,0 +1,67 @@
+[package]
+name = "simhark-realistic-runner"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "simhark-realistic"
+
+# An independent entry point also works when unrelated AI workspace members
+# cannot resolve against a changing local CrashPilot/firmware checkout.
+[workspace]
+
+[features]
+default = ["realistic"]
+realistic = []
+crashanter = ["dep:crashanter", "dep:core_dump"]
+
+[dependencies]
+simhark = { path = "../..", features = ["realistic"] }
+serde_json = "1"
+crashanter = { path = "../../../Crashanter", optional = true }
+core_dump = { path = "../../../core-dump", optional = true }
+
+[dev-dependencies]
+prost = "0.14.3"
+nalgebra = "0.34.2"
+bincode = "1.3"
+rand = "0.10"
+rand_chacha = "0.10"
+
+[[test]]
+name = "robot_config"
+path = "../../tests/robot_config.rs"
+
+[[test]]
+name = "realistic"
+path = "../../tests/realistic.rs"
+required-features = ["realistic"]
+
+[[test]]
+name = "realistic_full"
+path = "../../tests/realistic_full.rs"
+required-features = ["realistic"]
+
+[[bin]]
+name = "simhark-realistic"
+path = "../../src/bin/simhark-realistic.rs"
+
+[[bin]]
+name = "simhark-vimu"
+path = "src/vimu.rs"
+required-features = ["crashanter"]
+
+[[bin]]
+name = "simhark-calibrate"
+path = "../../src/bin/simhark-calibrate.rs"
+
+[[bin]]
+name = "simhark-vision-fixture"
+path = "../../src/bin/simhark-vision-fixture.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[[bin]]
+name = "simhark-controller-host"
+path = "src/controller_host.rs"

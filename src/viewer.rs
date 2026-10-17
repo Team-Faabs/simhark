@@ -327,6 +327,7 @@ struct PublishedGameState<'a> {
 
 pub struct ViewerServer {
   world_count: usize,
+  world_names: Arc<Mutex<Vec<String>>>,
   field: FieldConfig,
   robot_radius: f64,
   ball_radius: f64,
@@ -354,6 +355,7 @@ pub struct ViewerServer {
 #[derive(Serialize)]
 struct ViewerFrame<'a> {
   world_count: usize,
+  world_names: Vec<String>,
   selected_world: usize,
   selected_worlds: Vec<usize>,
   field: &'a FieldConfig,
@@ -388,6 +390,11 @@ impl ViewerServer {
 
     let selected_world = Arc::new(AtomicUsize::new(0));
     let selected_worlds = Arc::new(Mutex::new(vec![0]));
+    let world_names = Arc::new(Mutex::new(
+      (0..world_count)
+        .map(|index| format!("world {index}"))
+        .collect(),
+    ));
     let latest_frame = Arc::new(Mutex::new(None));
     let game_state = Arc::new(Mutex::new(GameStateTracker::default()));
     let test_suite = Arc::new(Mutex::new(None));
@@ -440,6 +447,7 @@ impl ViewerServer {
 
     Ok(Self {
       world_count,
+      world_names,
       field: world_config.field.clone(),
       robot_radius: world_config.blue_robots.radius,
       ball_radius: world_config.ball.radius,
@@ -684,6 +692,25 @@ impl ViewerServer {
     *self.selected_worlds.lock() = vec![index];
   }
 
+  /// Select every world for simultaneous rendering.
+  pub fn select_all_worlds(&self) {
+    self.selected_world.store(0, Ordering::Relaxed);
+    self.selected_worlds.lock().clear();
+  }
+
+  /// Set user-facing names for worlds in the viewer selector.
+  pub fn set_world_names(&self, names: Vec<String>) {
+    *self.world_names.lock() = (0..self.world_count)
+      .map(|index| {
+        names
+          .get(index)
+          .filter(|name| !name.is_empty())
+          .cloned()
+          .unwrap_or_else(|| format!("world {index}"))
+      })
+      .collect();
+  }
+
   /// Push a new referee snapshot. The viewer accumulates per-command counts
   /// so the UI can show "how many times have we entered each game state".
   pub fn set_game_state(&self, info: GameStateInfo) {
@@ -804,6 +831,7 @@ impl ViewerServer {
     let debug = self.debug.lock().get(&state.world_id).cloned();
     let frame = ViewerFrame {
       world_count: self.world_count,
+      world_names: self.world_names.lock().clone(),
       selected_world: self.selected_world(),
       selected_worlds,
       field: &self.field,
@@ -884,6 +912,7 @@ impl ViewerServer {
     let robot_inputs = replay_robot_inputs(replay_frame);
     let frame = ViewerFrame {
       world_count: self.world_count,
+      world_names: self.world_names.lock().clone(),
       selected_world: self.selected_world(),
       selected_worlds,
       field: &self.field,
@@ -1529,9 +1558,7 @@ fn selected_state(states: &[WorldState], selected_world: usize) -> Option<&World
   if states.is_empty() {
     return None;
   }
-  state_by_world_id(states, selected_world)
-    .or_else(|| states.get(selected_world))
-    .or_else(|| states.first())
+  state_by_world_id(states, selected_world).or_else(|| states.first())
 }
 
 fn state_by_world_id(states: &[WorldState], selected_world: usize) -> Option<&WorldState> {

@@ -1,0 +1,11 @@
+schema_version = 1
+
+[provenance]
+classification = "provisional"
+source = "Stress experiment: 1 A absolute modeled phase-current threshold; actual driver measurement boundary and debounce are unknown"
+owner = "teamfaabs"
+
+[motor]
+trip_current_a = 1.0
+trip_exposure_ns = 500000
+reset_duration_ns = 10000000

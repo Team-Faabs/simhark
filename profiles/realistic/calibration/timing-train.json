@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "clock_boundary": "REPLACE-exact-measurement-boundaries",
+    "common_clock_verified": false,
+    "firmware_id": "REPLACE-versions-and-programmed-modes",
+    "hardware_id": "REPLACE-robot-motor-sensor-serials",
+    "kind": "hardware",
+    "recording_id": "REPLACE-train-recording-id",
+    "source": "REPLACE-recording-path-and-measurement-setup"
+  },
+  "samples": [],
+  "schema_version": 1
+}

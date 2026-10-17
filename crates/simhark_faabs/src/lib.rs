@@ -56,7 +56,6 @@ impl<A: Ai + Default + Send> Faabs<A> {
     faabs
   }
 
-
   pub fn new(num_robots: u8, team: TeamColor) -> Self {
     Self::with_ai(num_robots, team, A::default())
   }

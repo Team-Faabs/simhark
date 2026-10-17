@@ -27,7 +27,7 @@ use crate::evaluator::{Evaluator, MatchReport};
 use crate::logio::GameLog;
 #[cfg(feature = "viewer-debug")]
 use crate::publish_controller_debug;
-use crate::{MatchConfig, PickupValidator, maybe_print_commands, world_config};
+use crate::{MatchConfig, PickupValidator, maybe_print_commands};
 
 /// How long to wait for the Sumatra JVM(s) to connect before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(40);
@@ -41,7 +41,7 @@ pub fn run(mc: &MatchConfig) -> MatchReport {
     Err(e) => {
       eprintln!("sumatra match failed: {e:#}");
       // Produce an empty 0-0 report so callers still get a structured result.
-      let cfg = world_config(mc.div, mc.seed);
+      let cfg = mc.world_config();
       Evaluator::new(
         cfg,
         format!("blue:{}", mc.blue.label()),
@@ -53,7 +53,7 @@ pub fn run(mc: &MatchConfig) -> MatchReport {
 }
 
 fn try_run(mc: &MatchConfig) -> Result<MatchReport> {
-  let mut cfg = world_config(mc.div, mc.seed);
+  let mut cfg = mc.world_config();
   let default_bots = cfg.robots_per_team;
   let bots = mc.bot_counts(default_bots);
   let physical_bots = mc.physical_bot_counts(default_bots);

@@ -58,7 +58,7 @@ const KEYBOARD_ROTATION_STEP = Math.PI / 36;
 const SNAPPED_ROTATION_STEP = Math.PI / 4;
 
 const WORLD_COLORS = [
-  { base: "#38bdf8", light: "#bae6fd", dark: "#0369a1" },
+  { base: "#94a3b8", light: "#e2e8f0", dark: "#475569" },
   { base: "#fb7185", light: "#fecdd3", dark: "#be123c" },
   { base: "#a78bfa", light: "#ddd6fe", dark: "#6d28d9" },
   { base: "#34d399", light: "#bbf7d0", dark: "#047857" },
