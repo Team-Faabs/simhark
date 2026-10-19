@@ -11,6 +11,7 @@ pub mod config;
 mod contact3d;
 pub mod controller;
 mod devices;
+mod drive_noise;
 pub mod hardware;
 pub mod live;
 pub mod localization;

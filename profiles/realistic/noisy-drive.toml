@@ -1,0 +1,12 @@
+# Provisional stress-test values, not measured hardware calibration.
+# Merge after your hardware profile, e.g. --profile profiles/realistic/full.toml
+# --profile profiles/realistic/noisy-drive.toml
+# WheelVelocity targets are wheel-shaft rad/s: RPM * 2*pi / 60.
+[motor]
+# Physical driver voltage disturbance, independently correlated for each wheel.
+voltage_noise_std_v = 0.15
+voltage_noise_time_constant_s = 0.02
+# Encoder position jitter before tick quantization; speed derives from these ticks.
+encoder_noise_std_ticks = 0.5
+# Lose 1% of acquisitions; stale readings retain their original timestamp.
+encoder_dropout_probability = 0.01

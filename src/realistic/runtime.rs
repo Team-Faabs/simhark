@@ -181,6 +181,7 @@ struct Robot {
   id: usize,
   config: RobotConfig,
   hardware: DriveHardware,
+  drive_noise: super::drive_noise::DriveNoise,
   imu_devices: Vec<super::devices::DeviceState>,
   receiver: Receiver,
   controller: Box<dyn RobotController>,
@@ -635,6 +636,7 @@ impl RealisticWorld {
           id: robot_id,
           config: robot_config.clone(),
           hardware: DriveHardware::new(),
+          drive_noise: super::drive_noise::DriveNoise::new(world_config.seed, id, ordinal),
           imu_devices,
           receiver: Receiver::new(1, config.watchdog_ns),
           controller: Box::new(EncoderVelocityController::new(
@@ -2433,6 +2435,10 @@ impl RealisticWorld {
       motor_config.supply_voltage_v = motor_config
         .supply_voltage_v
         .min(robot.power.voltage_v.max(0.0));
+      robot.hardware.voltage =
+        robot
+          .drive_noise
+          .voltages(robot.hardware.voltage, dt, &motor_config);
       if robot.hardware_profile.dynamics == super::profile::Dynamics::Free3d {
         super::contact3d::advance(
           body,
@@ -2555,31 +2561,34 @@ impl RealisticWorld {
   }
   fn encoders(&mut self, at: TimeNs) {
     for (index, robot) in self.robots.iter_mut().enumerate() {
-      let ticks =
-        std::array::from_fn(|i| robot.hardware.motors[i].encoder_ticks(&robot.motor_config));
-      let dt = robot
-        .previous_encoder_at
-        .map(|last| (at - last) as f64 * 1e-9);
-      let speed_rad_s = std::array::from_fn(|i| {
-        dt.map_or(0.0, |dt| {
-          (ticks[i] - robot.previous_ticks[i]) as f64 * std::f64::consts::TAU
-            / f64::from(robot.motor_config.encoder_ticks_per_revolution)
-            / dt
-        })
-      });
-      robot.previous_ticks = ticks;
-      robot.previous_encoder_at = Some(at);
-      self.timeline.schedule(
-        at + self.config.imu.delivery_delay_ns,
-        Event::EncoderDelivery {
-          robot: index,
-          sample: EncoderSample {
-            sampled_at: at,
-            ticks,
-            speed_rad_s,
+      if let Some(ticks) = robot
+        .drive_noise
+        .encoder_ticks(&robot.hardware.motors, &robot.motor_config)
+      {
+        let dt = robot
+          .previous_encoder_at
+          .map(|last| (at - last) as f64 * 1e-9);
+        let speed_rad_s = std::array::from_fn(|i| {
+          dt.map_or(0.0, |dt| {
+            (ticks[i] - robot.previous_ticks[i]) as f64 * std::f64::consts::TAU
+              / f64::from(robot.motor_config.encoder_ticks_per_revolution)
+              / dt
+          })
+        });
+        robot.previous_ticks = ticks;
+        robot.previous_encoder_at = Some(at);
+        self.timeline.schedule(
+          at + self.config.imu.delivery_delay_ns,
+          Event::EncoderDelivery {
+            robot: index,
+            sample: EncoderSample {
+              sampled_at: at,
+              ticks,
+              speed_rad_s,
+            },
           },
-        },
-      );
+        );
+      }
       let handle = if robot.team == TeamColor::Blue {
         &self.world.physics.blue_robots[robot.id]
       } else {

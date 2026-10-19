@@ -134,12 +134,17 @@ impl MotorConfig {
         self.viscous_drag_nm_per_rad_s,
         self.speed_gain_v_per_rad_s,
         self.peak_margin_a,
+        self.voltage_noise_std_v,
+        self.voltage_noise_time_constant_s,
+        self.encoder_noise_std_ticks,
       ]
       .iter()
       .any(|v| !v.is_finite() || *v < 0.0)
       || self
         .current_limit_a
         .is_some_and(|v| !v.is_finite() || v <= 0.0)
+      || !self.encoder_dropout_probability.is_finite()
+      || !(0.0..=1.0).contains(&self.encoder_dropout_probability)
       || self.encoder_ticks_per_revolution == 0
       || self.reset_duration_ns == 0
     {
@@ -220,6 +225,17 @@ pub struct MotorConfig {
   pub reset_duration_ns: u64,
   pub peak_margin_a: f64,
   pub encoder_ticks_per_revolution: u32,
+  /// Stationary standard deviation of independent wheel driver voltage errors.
+  /// Applied before electrical dynamics and supply clamping; zero disables it.
+  pub voltage_noise_std_v: f64,
+  /// Correlation time of voltage error; zero selects independent physics-step samples.
+  pub voltage_noise_time_constant_s: f64,
+  /// Gaussian shaft-position readout jitter in ticks, before integer quantization.
+  /// Does not change physical shaft rotation. Zero preserves ideal quantized ticks.
+  pub encoder_noise_std_ticks: f64,
+  /// Probability of losing an entire encoder acquisition (all four wheels).
+  /// The next successful speed reading spans the time since the previous success.
+  pub encoder_dropout_probability: f64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -364,6 +380,10 @@ impl Default for MotorConfig {
       reset_duration_ns: 10_000_000,
       peak_margin_a: 0.0,
       encoder_ticks_per_revolution: 2048,
+      voltage_noise_std_v: 0.0,
+      voltage_noise_time_constant_s: 0.0,
+      encoder_noise_std_ticks: 0.0,
+      encoder_dropout_probability: 0.0,
     }
   }
 }
