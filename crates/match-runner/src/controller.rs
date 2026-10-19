@@ -32,6 +32,15 @@ pub enum GameCommand {
 }
 
 pub trait Controller {
+  #[cfg(feature = "realistic")]
+  fn install_onboard(
+    &mut self,
+    _sim: &mut simhark::realistic::RealisticWorld,
+    _cfg: &WorldConfig,
+  ) -> Result<(), String> {
+    Ok(())
+  }
+
   #[cfg(all(feature = "viewer", feature = "hotreload"))]
   fn hotreload_update(&mut self) -> Option<(bool, String)> {
     None
@@ -112,6 +121,15 @@ fn start_crash_pilot<A: Ai>(faabs: &mut Faabs<A>, color: TeamColor) {
 
 #[cfg(feature = "faabs")]
 impl<A: Ai + Send> Controller for FaabsController<A> {
+  #[cfg(feature = "realistic")]
+  fn install_onboard(
+    &mut self,
+    sim: &mut simhark::realistic::RealisticWorld,
+    cfg: &WorldConfig,
+  ) -> Result<(), String> {
+    self.faabs.install_realistic(sim, cfg)
+  }
+
   fn name(&self) -> &str {
     &self.name
   }

@@ -10,7 +10,11 @@ use crate::command::WorldCommand;
 use crate::config::WorldConfig;
 use crate::state::{TeamColor, WorldState};
 
-const MAGIC: &[u8; 8] = b"SHREPL01";
+mod legacy;
+use bincode::Options;
+const LEGACY_MAGIC: &[u8; 8] = b"SHREPL01";
+// Increment when changing any positional ReplayLog or nested configuration layout.
+const MAGIC: &[u8; 8] = b"SHREPL02";
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,11 +163,25 @@ impl ReplayLog {
     let mut reader = BufReader::new(file);
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
-    if &magic != MAGIC {
+    if &magic != MAGIC && &magic != LEGACY_MAGIC {
       return Err(ReplayError::BadMagic(magic));
     }
-    let decoder = zstd::Decoder::new(reader)?;
-    Ok(bincode::deserialize_from(decoder)?)
+    let mut decoder = zstd::Decoder::new(reader)?;
+    if &magic == MAGIC {
+      return Ok(bincode::deserialize_from(decoder)?);
+    }
+    let mut bytes = Vec::new();
+    decoder.read_to_end(&mut bytes)?;
+    let codec = bincode::DefaultOptions::new()
+      .with_fixint_encoding()
+      .with_limit(bytes.len() as u64)
+      .reject_trailing_bytes();
+    // PR #2 also wrote the expanded configuration under SHREPL01. Try the
+    // original layout first, requiring complete consumption before accepting.
+    if let Ok(log) = codec.deserialize::<legacy::LegacyLog>(&bytes) {
+      return Ok(log.into());
+    }
+    Ok(codec.deserialize(&bytes)?)
   }
 }
 

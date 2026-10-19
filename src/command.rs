@@ -18,6 +18,9 @@ pub enum MoveCommand {
   /// Individual wheel angular speeds in rad/s:
   /// [front_right, front_left, back_left, back_right].
   WheelVelocity([f64; 4]),
+  /// Opaque host instruction for an installed realistic onboard controller.
+  /// Transport delivers these bytes before onboard logic reads local sensors.
+  Onboard(Vec<u8>),
 }
 
 /// Command for a single robot.

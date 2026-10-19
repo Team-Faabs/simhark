@@ -65,3 +65,12 @@ lto = "thin"
 [[bin]]
 name = "simhark-controller-host"
 path = "src/controller_host.rs"
+
+[[test]]
+name = "realistic_regressions"
+path = "../../tests/realistic_regressions.rs"
+required-features = ["realistic"]
+
+[[test]]
+name = "replay_compatibility"
+path = "../../tests/replay_compatibility.rs"

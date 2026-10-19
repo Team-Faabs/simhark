@@ -34,7 +34,7 @@ ungabunga = { path = "../../../bangka/ungabunga", optional = true }
 dehumanized = { path = "../../../dehumanized", optional = true }
 
 [features]
-realistic = ["simhark/realistic", "simhark-sumatra?/realistic"]
+realistic = ["simhark/realistic", "simhark-sumatra?/realistic", "simhark_faabs?/realistic"]
 default = ["bangka", "bongka", "ungabunga", "dehumanized", "sim-time"]
 all = [
   "bangka",

@@ -3,6 +3,19 @@ use super::{config::MotorConfig, sensors::Observations, time::TimeNs};
 use crate::{MoveCommand, RobotCommand, RobotConfig};
 
 pub trait RobotController: Send {
+  /// Decode a transported host instruction and run local onboard logic. The
+  /// readiness input is the local kicker/driver status, not host telemetry.
+  /// The result drives the local motor controller and peripherals this tick.
+  fn onboard_command(
+    &mut self,
+    _now: TimeNs,
+    _payload: &[u8],
+    _observations: &Observations,
+    _kicker_ready: bool,
+  ) -> Option<RobotCommand> {
+    None
+  }
+
   /// Returning None opens the driver output (coasting). Some(0) actively brakes.
   fn tick(
     &mut self,
@@ -108,6 +121,7 @@ impl RobotController for EncoderVelocityController {
               angular,
             )
           }
+          MoveCommand::Onboard(_) => return [None; 4],
           MoveCommand::WheelVelocity(_) => unreachable!(),
         };
         let speed = vx.hypot(vy);
