@@ -8,6 +8,8 @@ use simhark::{TeamColor, WorldConfig, WorldState};
 
 pub struct ReferrisAutoref {
   autoref: AutoRef,
+  enabled: bool,
+  interface: Option<referris::webinterface::ReferrisInterfaceAdapter>,
   blue_yellow_cards: u32,
   yellow_yellow_cards: u32,
   blue_red_cards: u32,
@@ -25,6 +27,8 @@ impl ReferrisAutoref {
   pub fn new() -> Self {
     Self {
       autoref: AutoRef::default(),
+      enabled: true,
+      interface: None,
       blue_yellow_cards: 0,
       yellow_yellow_cards: 0,
       blue_red_cards: 0,
@@ -40,18 +44,32 @@ impl ReferrisAutoref {
     command_code: i32,
     quiet: bool,
   ) -> ReferrisTick {
+    self.apply_interface_commands();
     let command = command_from_ssl_code(command_code);
     let input = referris_input(state, cfg, score, command);
-    let step = self.autoref.step(&input);
+    let step = self.enabled.then(|| self.autoref.step(&input));
 
     if !quiet {
-      for event in step.events.iter().filter(|event| important_event(event)) {
+      for event in step
+        .as_ref()
+        .into_iter()
+        .flat_map(|step| &step.events)
+        .filter(|event| important_event(event))
+      {
         println!(
           "  [{:6.1}s] referris: {}",
           state.sim_time,
           event_label(event)
         );
       }
+    }
+
+    let events = step.as_ref().map_or(&[][..], |step| step.events.as_slice());
+    let snapshot = self.autoref.referee_state().map(|state| state.snapshot());
+    if let Some(interface) = &self.interface
+      && let Err(error) = interface.publish(snapshot, events, self.enabled)
+    {
+      eprintln!("[referris-interface] {error}");
     }
 
     let referee = self.autoref.referee_state().map(|state| {
@@ -94,6 +112,67 @@ impl ReferrisAutoref {
         command_counter: state.frame as u32,
         command_label: command_label(command),
       }
+    }
+  }
+
+  pub fn attach_interface(
+    &mut self,
+    handle: &webinterface_core::InterfaceHandle,
+    session_id: webinterface_protocol::SessionId,
+  ) -> Result<(), webinterface_core::InterfaceError> {
+    self.interface = Some(referris::webinterface::ReferrisInterfaceAdapter::register(
+      handle, session_id, true,
+    )?);
+    Ok(())
+  }
+
+  fn apply_interface_commands(&mut self) {
+    loop {
+      let Some(queued) = self
+        .interface
+        .as_mut()
+        .and_then(|interface| interface.try_next_command())
+      else {
+        break;
+      };
+      let result = match queued.command {
+        webinterface_protocol::ReferrisCommand::Start => {
+          self.enabled = true;
+          Ok("Referris started".to_string())
+        }
+        webinterface_protocol::ReferrisCommand::Stop => {
+          self.enabled = false;
+          Ok("Referris stopped".to_string())
+        }
+        webinterface_protocol::ReferrisCommand::Reset => {
+          self.autoref = AutoRef::default();
+          Ok("Referris reset".to_string())
+        }
+        webinterface_protocol::ReferrisCommand::SetConfiguration(value) => {
+          serde_json::from_value::<referris::AutoRefConfig>(value)
+            .map(|config| {
+              self.autoref = AutoRef::new(config);
+              "Referris configuration applied".to_string()
+            })
+            .map_err(|error| error.to_string())
+        }
+        webinterface_protocol::ReferrisCommand::EmitEvent(value) => self
+          .interface
+          .as_ref()
+          .expect("interface exists while draining commands")
+          .publish_operator_event(value)
+          .map(|_| "Referris operator event emitted".to_string())
+          .map_err(|error| error.to_string()),
+      };
+      let (status, message) = match result {
+        Ok(message) => (webinterface_protocol::CommandStatus::Applied, message),
+        Err(message) => (webinterface_protocol::CommandStatus::Rejected, message),
+      };
+      self
+        .interface
+        .as_ref()
+        .expect("interface exists while acknowledging commands")
+        .acknowledge(queued.id, status, message);
     }
   }
 

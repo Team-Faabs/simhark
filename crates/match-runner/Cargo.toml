@@ -22,7 +22,11 @@ anyhow = "1.0"
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+webinterface-assets = { git = "https://github.com/Technulgy-LGNU/interfaabs" }
+webinterface-core = { git = "https://github.com/Technulgy-LGNU/interfaabs" }
+webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/interfaabs" }
+webinterface-dehumanized-schema = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
 
 bangka = { path = "../../../bangka/bangka", optional = true }
 bongka = { path = "../../../bangka/bongka", optional = true }
@@ -48,9 +52,9 @@ bongka = ["faabs", "dep:bongka"]
 ungabunga = ["faabs", "dep:ungabunga"]
 dehumanized = ["dep:dehumanized"]
 hotreload = ["dehumanized", "dehumanized/hotreload"]
-viewer = ["simhark/viewer"]
+viewer = ["simhark/viewer", "simhark_faabs?/viewer", "dep:webinterface-dehumanized-schema"]
 viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs?/viewer-debug"]
 sim-time = ["faabs", "simhark_faabs/sim-time"]
 sumatra = ["dep:simhark-sumatra"]
-referris = ["dep:referris"]
+referris = ["dep:referris", "referris/webinterface"]
 validator = ["referris"]
