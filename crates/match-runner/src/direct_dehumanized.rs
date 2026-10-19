@@ -45,6 +45,8 @@ pub struct DirectDehumanizedController {
   run: Option<EntryRun>,
   state: DeveloperRunState,
   message: String,
+  #[cfg(feature = "hotreload")]
+  last_reload_status: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -210,6 +212,8 @@ impl DirectDehumanizedController {
       run: None,
       state: DeveloperRunState::Idle,
       message: "No entry loaded".to_string(),
+      #[cfg(feature = "hotreload")]
+      last_reload_status: None,
     }
   }
 
@@ -362,12 +366,36 @@ impl DirectDehumanizedController {
 }
 
 impl Controller for DirectDehumanizedController {
+  #[cfg(all(feature = "viewer", feature = "hotreload"))]
+  fn hotreload_update(&mut self) -> Option<(bool, String)> {
+    let status = self
+      .ai
+      .hotreload(serde_json::json!({"action": "status"}))
+      .unwrap_or_else(|error| serde_json::json!({"ok": false, "message": error}));
+    if self.last_reload_status.as_ref() == Some(&status) {
+      return None;
+    }
+    let result = (
+      status["ok"].as_bool().unwrap_or(false),
+      status["message"]
+        .as_str()
+        .unwrap_or("Core updated")
+        .to_string(),
+    );
+    self.last_reload_status = Some(status);
+    Some(result)
+  }
+
   fn name(&self) -> &str {
     "dehumanized"
   }
 
   #[cfg(feature = "viewer")]
   fn developer_schema(&self) -> Option<Value> {
+    #[cfg(feature = "hotreload")]
+    if let Ok(schema) = self.ai.hotreload_schema() {
+      return Some(schema);
+    }
     Some(renderer_schema())
   }
 
@@ -401,7 +429,21 @@ impl Controller for DirectDehumanizedController {
         config,
         params,
         ..
-      } => self.load(kind, entry, config, params),
+      } => {
+        #[cfg(feature = "hotreload")]
+        if kind == "hotreload" {
+          let response = self.ai.hotreload(serde_json::json!({
+            "action": "build", "profile": config["profile"], "watch": config["watch"],
+          }))?;
+          return Ok(
+            response["message"]
+              .as_str()
+              .unwrap_or("Core updated")
+              .to_string(),
+          );
+        }
+        self.load(kind, entry, config, params)
+      }
       simhark::viewer::DeveloperRequest::Start { .. } => self.start(world, color, gc),
       simhark::viewer::DeveloperRequest::Stop { .. } => self.stop(),
       simhark::viewer::DeveloperRequest::Disable { .. } => Ok(self.disable()),

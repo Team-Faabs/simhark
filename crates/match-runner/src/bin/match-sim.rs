@@ -30,6 +30,13 @@ fn parse() -> Result<Args, String> {
   let mut it = std::env::args().skip(1).peekable();
   while let Some(a) = it.next() {
     match a.as_str() {
+      "--physics-config" => mc.physics_config = Some(next_arg(&mut it, &a)?.into()),
+      #[cfg(feature = "realistic")]
+      "--realistic-profile" => {
+        let path = next_arg(&mut it, &a)?;
+        mc.realistic_profile =
+          Some(simhark::realistic::profiles::resolve(&[std::path::PathBuf::from(path)])?.config);
+      }
       "--blue" => mc.blue = TeamKind::parse(&next_arg(&mut it, &a)?)?,
       "--yellow" => mc.yellow = TeamKind::parse(&next_arg(&mut it, &a)?)?,
       "--blue-bots" => mc.blue_bots = Some(parse_bots(&next_arg(&mut it, &a)?, "--blue-bots")?),
@@ -148,6 +155,7 @@ Options:\n\
   --yellow-bots <n> yellow AI robot count; 0 disables yellow AI (default from --div)\n\
   --seconds <f>     match length in sim seconds (default 60)\n\
   --div <a|b>       division / field+robot count (default b)\n\
+  --physics-config <path> load [simulation] physics settings (default config.toml)\n\
   --seed <u>        RNG seed (default 1)\n\
   --matches <n>     play n matches (seeds seed..seed+n) and aggregate\n\
   --log <path>      write SSL log file (Loguna-compatible)\n\

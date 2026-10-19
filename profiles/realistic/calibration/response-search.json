@@ -1,0 +1,6 @@
+{
+  "max_delay_ns": 5000000,
+  "max_time_constant_ns": 5000000,
+  "grid_step_ns": 100000,
+  "held_out_rmse_tolerance": 0.01
+}

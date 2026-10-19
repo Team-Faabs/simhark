@@ -182,11 +182,22 @@ struct DriveParams {
   max_torque: f32,
   max_speed: f32,
   max_angular_speed: f32,
+  wheel_contact: Option<PlanarWheelContact>,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarWheelContact {
+  response: crate::contact::ContactResponse,
+  angles: [f64; WHEEL_COUNT],
+  radius: f64,
+  wheel_radius: f64,
+  max_wheel_force: f64,
+  normal_loads: [f64; WHEEL_COUNT],
 }
 
 impl DriveParams {
-  fn from_config(cfg: &RobotConfig) -> Self {
-    let mass = cfg.body_mass as f32;
+  fn from_config(cfg: &RobotConfig, physics: &crate::config::PhysicsConfig) -> Self {
+    let mass = cfg.mass_kg.unwrap_or(cfg.body_mass) as f32;
     let radius = cfg.radius as f32;
     // Solid cylinder spinning about its symmetry axis: I = 0.5 m r^2.
     let inertia_z = 0.5 * mass * radius * radius;
@@ -197,6 +208,43 @@ impl DriveParams {
       max_torque: inertia_z * cfg.acc_speedup_angular_max as f32,
       max_speed: cfg.vel_absolute_max as f32,
       max_angular_speed: cfg.vel_angular_max as f32,
+      wheel_contact: cfg.wheel.as_ref().map(|wheel| {
+        let angles = cfg.wheel_angles.map(f64::to_radians);
+        let geometry = SMatrix::<f64, 3, WHEEL_COUNT>::from_fn(|row, col| match row {
+          0 => 1.0,
+          1 => cfg.radius * angles[col].cos(),
+          _ => cfg.radius * angles[col].sin(),
+        });
+        let weight = cfg.mass_kg.unwrap_or(cfg.body_mass + cfg.kicker_mass) * physics.gravity;
+        let com = cfg.center_of_mass_body_m.unwrap_or([0.0; 3]);
+        let loads = geometry.transpose()
+          * (geometry * geometry.transpose())
+            .try_inverse()
+            .expect("robot wheel support geometry should be invertible")
+          * NVec3::new(weight, weight * com[0], weight * com[1]);
+        let sum: f64 = loads.iter().map(|v| v.max(0.0)).sum();
+        PlanarWheelContact {
+          response: crate::contact::ContactResponse::new(
+            wheel,
+            &physics.floor,
+            cfg.wheel_tangent_friction,
+            cfg.wheel_perpendicular_friction,
+            25.0,
+            0.01,
+          ),
+          angles,
+          radius: cfg.radius,
+          wheel_radius: cfg.wheel_radius,
+          max_wheel_force: cfg.wheel_motor_fmax / cfg.wheel_radius,
+          normal_loads: std::array::from_fn(|i| {
+            if sum > 0.0 {
+              loads[i].max(0.0) * weight / sum
+            } else {
+              0.0
+            }
+          }),
+        }
+      }),
     }
   }
 }
@@ -307,8 +355,8 @@ impl PhysicsWorld {
       yellow_wheel_speeds: vec![[0.0; WHEEL_COUNT]; config.robots_per_team],
       blue_drive_enabled: vec![true; config.robots_per_team],
       yellow_drive_enabled: vec![true; config.robots_per_team],
-      blue_drive_params: DriveParams::from_config(&config.blue_robots),
-      yellow_drive_params: DriveParams::from_config(&config.yellow_robots),
+      blue_drive_params: DriveParams::from_config(&config.blue_robots, &config.physics),
+      yellow_drive_params: DriveParams::from_config(&config.yellow_robots, &config.physics),
       ball_friction: config.ball.friction as f32,
       ball_mass: config.ball.mass as f32,
       ball_radius: config.ball.radius as f32,
@@ -459,6 +507,31 @@ impl PhysicsWorld {
       bodies,
     );
 
+    if robot_cfg.mass_kg.is_some() || robot_cfg.center_of_mass_body_m.is_some() {
+      for handle in [chassis_collider, dummy_collider, kicker_collider] {
+        colliders[handle].set_mass(0.0);
+      }
+      let mass = robot_cfg
+        .mass_kg
+        .unwrap_or(robot_cfg.body_mass + robot_cfg.kicker_mass) as f32;
+      let com = robot_cfg.center_of_mass_body_m.unwrap_or([0.0; 3]);
+      let transverse =
+        mass * (3.0 * (robot_cfg.radius as f32).powi(2) + (robot_cfg.height as f32).powi(2)) / 12.0;
+      bodies[chassis_body].set_additional_mass_properties(
+        MassProperties::new(
+          Vector::new(com[0] as f32, com[1] as f32, com[2] as f32),
+          mass,
+          Vector::new(
+            transverse,
+            transverse,
+            0.5 * mass * (robot_cfg.radius as f32).powi(2),
+          ),
+        ),
+        true,
+      );
+      bodies[chassis_body].recompute_mass_properties_from_colliders(colliders);
+    }
+
     RobotHandles {
       chassis_body,
       chassis_collider,
@@ -605,7 +678,11 @@ impl PhysicsWorld {
         continue;
       }
       let (vx, vy, vw) = self.blue_drive.body_velocity(*speeds);
-      self.apply_drive_force(handle, vx, vy, vw, self.blue_drive_params, dt_substep);
+      if let Some(contact) = self.blue_drive_params.wheel_contact {
+        self.apply_wheel_contact_force(handle, *speeds, contact);
+      } else {
+        self.apply_drive_force(handle, vx, vy, vw, self.blue_drive_params, dt_substep);
+      }
     }
     let yellow_handles = self.yellow_robots.clone();
     let yellow_speeds = self.yellow_wheel_speeds.clone();
@@ -619,7 +696,53 @@ impl PhysicsWorld {
         continue;
       }
       let (vx, vy, vw) = self.yellow_drive.body_velocity(*speeds);
-      self.apply_drive_force(handle, vx, vy, vw, self.yellow_drive_params, dt_substep);
+      if let Some(contact) = self.yellow_drive_params.wheel_contact {
+        self.apply_wheel_contact_force(handle, *speeds, contact);
+      } else {
+        self.apply_drive_force(handle, vx, vy, vw, self.yellow_drive_params, dt_substep);
+      }
+    }
+  }
+
+  fn apply_wheel_contact_force(
+    &mut self,
+    robot: &RobotHandles,
+    speeds: [f32; WHEEL_COUNT],
+    contact: PlanarWheelContact,
+  ) {
+    let body = &mut self.rigid_body_set[robot.chassis_body];
+    for i in 0..WHEEL_COUNT {
+      let angle = contact.angles[i];
+      let point = body.position().transform_point(Vector::new(
+        (contact.radius * angle.cos()) as f32,
+        (contact.radius * angle.sin()) as f32,
+        0.0,
+      ));
+      let direction =
+        body
+          .rotation()
+          .mul_vec3(Vector::new(-angle.sin() as f32, angle.cos() as f32, 0.0));
+      let sideways = Vector::new(-direction.y, direction.x, 0.0);
+      let velocity = body.velocity_at_point(point);
+      let forward_speed = f64::from(velocity.dot(direction));
+      let slip = f64::from(speeds[i]) * contact.wheel_radius - forward_speed;
+      let normal = contact.normal_loads[i];
+      let traction = contact
+        .response
+        .longitudinal_force(slip, normal)
+        .clamp(-contact.max_wheel_force, contact.max_wheel_force);
+      let side_force = contact
+        .response
+        .transverse_force(-f64::from(velocity.dot(sideways)), normal);
+      let rolling = (contact.response.rolling_resistance * normal).min(
+        forward_speed.abs() * f64::from(body.mass())
+          / (WHEEL_COUNT as f64 * f64::from(self.integration_parameters.dt)),
+      ) * forward_speed.signum();
+      body.add_force_at_point(
+        direction * (traction - rolling) as f32 + sideways * side_force as f32,
+        point,
+        true,
+      );
     }
   }
 

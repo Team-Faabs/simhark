@@ -41,7 +41,19 @@ fn main() {
   println!("  Domain randomization: {randomize}");
   println!();
 
-  let config = WorldConfig::division_a();
+  let mut config = WorldConfig::division_a();
+  let loaded = if let Some(index) = args.iter().position(|arg| arg == "--physics-config") {
+    args
+      .get(index + 1)
+      .ok_or_else(|| "missing --physics-config path".to_string())
+      .and_then(|path| config.load_simulation_config(path))
+  } else {
+    config.load_default_simulation_config()
+  };
+  if let Err(error) = loaded {
+    eprintln!("Failed to load simulator configuration: {error}");
+    std::process::exit(2);
+  }
 
   let start = Instant::now();
   let mut engine = if randomize {

@@ -25,6 +25,7 @@
 
 pub mod command;
 pub mod config;
+mod contact;
 pub mod controller;
 pub mod domain_randomization;
 pub mod engine;
@@ -34,6 +35,8 @@ pub mod grsim;
 pub mod motion_audit;
 pub mod physics;
 pub mod proto;
+#[cfg(feature = "realistic")]
+pub mod realistic;
 pub mod replay;
 pub mod robot;
 pub mod state;

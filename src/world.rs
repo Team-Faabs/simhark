@@ -811,6 +811,14 @@ impl World {
   pub fn team_configs(&self) -> (&RobotConfig, &RobotConfig) {
     (&self.config.blue_robots, &self.config.yellow_robots)
   }
+
+  #[cfg(feature = "realistic")]
+  pub(crate) fn realistic_frame_end(&mut self) {
+    for sim in self.blue_sims.iter_mut().chain(&mut self.yellow_sims) {
+      sim.step_kicker();
+    }
+    self.refresh_robot_ball_contacts();
+  }
 }
 
 /// Among all robots whose IR currently fires, keep only the one whose kicker

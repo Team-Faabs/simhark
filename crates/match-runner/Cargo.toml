@@ -34,6 +34,7 @@ ungabunga = { path = "../../../bangka/ungabunga", optional = true }
 dehumanized = { path = "../../../dehumanized", optional = true }
 
 [features]
+realistic = ["simhark/realistic", "simhark-sumatra?/realistic"]
 default = ["bangka", "bongka", "ungabunga", "dehumanized", "sim-time"]
 all = [
   "bangka",
@@ -50,6 +51,7 @@ bangka = ["faabs", "dep:bangka"]
 bongka = ["faabs", "dep:bongka"]
 ungabunga = ["faabs", "dep:ungabunga"]
 dehumanized = ["dep:dehumanized"]
+hotreload = ["dehumanized", "dehumanized/hotreload"]
 viewer = ["simhark/viewer", "simhark_faabs?/viewer", "dep:webinterface-dehumanized-schema"]
 viewer-debug = ["viewer", "simhark/viewer-debug", "simhark_faabs?/viewer-debug"]
 sim-time = ["faabs", "simhark_faabs/sim-time"]

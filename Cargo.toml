@@ -6,6 +6,7 @@ description = "A high-performance parallel RoboCup SSL simulator inspired by grS
 license = "GPL-3.0"
 
 [workspace]
+exclude = ["crates/robot-command-receiver", "tools/realistic-runner", "tools/firmware-runner", "tools/baseline-runner"]
 members = [
     "crates/simhark-sumatra",
     "crates/simhark_faabs",
@@ -24,6 +25,8 @@ viewer = [
 ]
 viewer-debug = ["viewer"]
 motion-audit = []
+# Separate opt-in simulator. The normal World/SimulationEngine path is unchanged.
+realistic = ["dep:sha2", "dep:robot-command-receiver", "serde_json/float_roundtrip"]
 
 [lib]
 name = "simhark"
@@ -55,6 +58,9 @@ env_logger = "0.11"
 prost = "0.14.3"
 prost-types = "0.14.3"
 loguna = { path = "../loguna/loguna" }
+toml = "0.9"
+robot-command-receiver = { path = "crates/robot-command-receiver", optional = true }
+sha2 = { version = "0.10", optional = true }
 webinterface-assets = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
 webinterface-core = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
 webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
@@ -75,6 +81,21 @@ prost-build = "0.13"
 [[bench]]
 name = "simulation"
 harness = false
+
+[[bin]]
+name = "simhark-realistic"
+path = "src/bin/simhark-realistic.rs"
+required-features = ["realistic"]
+
+[[bin]]
+name = "simhark-calibrate"
+path = "src/bin/simhark-calibrate.rs"
+required-features = ["realistic"]
+
+[[bin]]
+name = "simhark-vision-fixture"
+path = "src/bin/simhark-vision-fixture.rs"
+required-features = ["realistic"]
 
 [profile.release]
 opt-level = 2

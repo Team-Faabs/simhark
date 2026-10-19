@@ -23,3 +23,39 @@ websocket_port = 4096
 [robots]
 0 = { ip = "10.0.64.101", substitution_pos = { x = 6200, y = 400 } }
 
+
+# Simulator physics. Loaded by simhark, simhark_faabs, and match-sim.
+# Unspecified values retain the selected division's defaults. All units are SI.
+[simulation.blue_robots]
+body_mass = 2.0
+wheel_mass = 0.2
+kicker_mass = 0.02
+# Optional total simulated robot mass, including the kicker:
+# mass_kg = 2.02
+# CoM relative to chassis origin; x forward, y left, z up (meters).
+# Standard simulation remains planar; use realistic mode for tipping.
+# center_of_mass_body_m = [0.0, 0.0, -0.0505]
+
+[simulation.yellow_robots]
+body_mass = 2.0
+wheel_mass = 0.2
+kicker_mass = 0.02
+# mass_kg = 2.02
+# center_of_mass_body_m = [0.0, 0.0, -0.0505]
+
+# Uncomment a team's wheel table to enable directional slip/contact physics.
+# Repeat for yellow_robots to configure both teams independently.
+# [simulation.blue_robots.wheel]
+# longitudinal_friction = 0.8
+# transverse_friction = 0.05
+# longitudinal_slip_stiffness_n_per_m_s = 25.0
+# transverse_slip_stiffness_n_per_m_s = 25.0
+# rolling_resistance = 0.01
+
+# Shared carpet/floor properties, separate from robot wheel material.
+[simulation.physics.floor]
+longitudinal_grip_scale = 1.0
+transverse_grip_scale = 1.0
+longitudinal_slip_compliance_m_s_per_n = 0.0
+transverse_slip_compliance_m_s_per_n = 0.0
+rolling_resistance_scale = 1.0

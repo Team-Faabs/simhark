@@ -3,6 +3,7 @@ import type { TestSuiteSnapshot } from "../hooks/useViewerSocket";
 
 interface WorldSelectorProps {
   worldCount: number;
+  worldNames?: string[];
   selected: number[];
   suite: TestSuiteSnapshot | null;
   onSelect: (indexes: number[] | "all") => void;
@@ -10,6 +11,7 @@ interface WorldSelectorProps {
 
 export default function WorldSelector({
   worldCount,
+  worldNames = [],
   selected,
   suite,
   onSelect,
@@ -83,7 +85,7 @@ export default function WorldSelector({
         >
           {Array.from({ length: safeCount }, (_, i) => (
             <option key={i} value={i}>
-              world {i}
+              {worldNames[i] || `world ${i}`}
             </option>
           ))}
         </select>

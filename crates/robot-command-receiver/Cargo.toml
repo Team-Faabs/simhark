@@ -1,0 +1,11 @@
+[package]
+name = "robot-command-receiver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Production-shareable redundant robot command acceptance contract"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

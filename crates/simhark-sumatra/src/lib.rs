@@ -65,6 +65,9 @@ impl SumatraInstance {
         .prefix("simhark-sumatra-")
         .tempdir()
         .context("failed to create isolated Sumatra config dir")?;
+      // An isolated client still needs geometry, bot limits and AI settings.
+      // Copy rather than symlink: Sumatra may persist changes at shutdown.
+      copy_config_tree(&config.repo_root.join("config"), &dir.path().join("config"))?;
       write_user_config(dir.path(), port)?;
       temp_dir = Some(dir);
       temp_dir
@@ -195,4 +198,18 @@ fn write_user_config(dir: &Path, sim_net_port: u16) -> Result<()> {
   );
   fs::write(config_dir.join("user.xml"), content)
     .with_context(|| format!("failed to write {}", config_dir.join("user.xml").display()))
+}
+
+fn copy_config_tree(source: &Path, destination: &Path) -> Result<()> {
+  fs::create_dir_all(destination)?;
+  for entry in fs::read_dir(source)? {
+    let entry = entry?;
+    let target = destination.join(entry.file_name());
+    if entry.file_type()?.is_dir() {
+      copy_config_tree(&entry.path(), &target)?;
+    } else if entry.file_type()?.is_file() {
+      fs::copy(entry.path(), target)?;
+    }
+  }
+  Ok(())
 }

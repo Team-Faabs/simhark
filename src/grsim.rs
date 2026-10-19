@@ -22,6 +22,19 @@ use crate::proto::{
 use crate::state::{KickStatus, TeamColor, WorldState};
 
 const DEFAULT_VISION_ADDR: Ipv4Addr = Ipv4Addr::new(224, 5, 23, 2);
+
+#[cfg(feature = "realistic")]
+pub(crate) mod realistic_codec {
+  pub fn grsim(c: crate::proto::GrSimCommands) -> (crate::TeamColor, Vec<crate::RobotCommand>) {
+    super::world_commands_from_grsim(c)
+  }
+  pub fn ssl(
+    c: crate::proto::RobotControl,
+    geometry: &crate::RobotConfig,
+  ) -> Vec<crate::RobotCommand> {
+    super::world_commands_from_robot_control(c, geometry)
+  }
+}
 const DEFAULT_VISION_PORT: u16 = 10020;
 const DEFAULT_COMMAND_PORT: u16 = 20011;
 const DEFAULT_BLUE_STATUS_PORT: u16 = 30011;

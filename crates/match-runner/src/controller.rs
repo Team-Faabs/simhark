@@ -32,6 +32,10 @@ pub enum GameCommand {
 }
 
 pub trait Controller {
+  #[cfg(all(feature = "viewer", feature = "hotreload"))]
+  fn hotreload_update(&mut self) -> Option<(bool, String)> {
+    None
+  }
   fn name(&self) -> &str;
   #[cfg(feature = "viewer")]
   fn attach_interface(

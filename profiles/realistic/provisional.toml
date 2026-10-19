@@ -1,0 +1,11 @@
+# All omitted fields resolve to RealisticConfig's provisional defaults.
+schema_version = 1
+physics_step_ns = 250000
+control_rate_hz = 1000
+command_ttl_ns = 50000000
+watchdog_ns = 100000000
+
+[provenance]
+classification = "provisional"
+source = "Exploratory planar model; no assembled-robot measurements"
+owner = "teamfaabs"
