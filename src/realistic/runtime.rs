@@ -501,6 +501,7 @@ pub struct RealisticWorld {
   cameras: Vec<super::vision::CameraModel>,
   trackers: [super::vision::VisionTracker; 3],
   tracked: [super::vision::ObservedWorld; 3],
+  visible: [super::vision::ObservedWorld; 3],
   world: World,
   config: RealisticConfig,
   timeline: Timeline<Event>,
@@ -823,6 +824,7 @@ impl RealisticWorld {
         super::vision::VisionTracker::new(config.tracker.clone()).with_cameras(&config.cameras)
       }),
       tracked: std::array::from_fn(|_| super::vision::ObservedWorld::default()),
+      visible: std::array::from_fn(|_| super::vision::ObservedWorld::default()),
       world,
       robots,
       sequence: 0,
@@ -957,7 +959,7 @@ impl RealisticWorld {
       .map(|r| &r.observations)
   }
   pub fn team_observations(&self, team: TeamColor) -> &super::vision::ObservedWorld {
-    &self.tracked[team as usize]
+    &self.visible[team as usize]
   }
   pub fn reset_localization(
     &mut self,
@@ -1037,7 +1039,7 @@ impl RealisticWorld {
     Ok(())
   }
   pub fn official_observations(&self) -> &super::vision::ObservedWorld {
-    &self.tracked[2]
+    &self.visible[2]
   }
   pub fn set_controller(
     &mut self,
@@ -1269,6 +1271,11 @@ impl RealisticWorld {
               values.extend([vx, vy, angular])
             }
             crate::MoveCommand::WheelVelocity(speeds) => values.extend(speeds),
+            crate::MoveCommand::Onboard(bytes) => {
+              if bytes.len() > 65536 {
+                return Err("onboard instruction exceeds 64 KiB".into());
+              }
+            }
           }
         }
         if values.iter().any(|v| !v.is_finite()) {
@@ -1354,6 +1361,8 @@ impl RealisticWorld {
         return Err("event queue capacity exceeded".into());
       }
     }
+    self.visible =
+      std::array::from_fn(|i| self.tracked[i].at_time(self.now(), self.config.tracker.max_age_ns));
     self.world.sim_time = self.physical_time as f64 * 1e-9;
     Ok(())
   }
@@ -2274,10 +2283,25 @@ impl RealisticWorld {
       };
       robot.requested_command_times =
         active.map(|packet| (packet.decision_at, packet.published_at));
-      robot.requested_voltage =
-        robot
-          .controller
-          .tick(at, active.map(|p| &p.command), &robot.observations);
+      let onboard = active.and_then(|p| match p.command.move_command.as_ref() {
+        Some(crate::MoveCommand::Onboard(payload)) => robot.controller.onboard_command(
+          at,
+          payload,
+          &robot.observations,
+          !robot.power.brownout && at >= robot.power.kicker_ready_at,
+        ),
+        _ => None,
+      });
+      let is_onboard = active
+        .is_some_and(|p| matches!(p.command.move_command, Some(crate::MoveCommand::Onboard(_))));
+      let local_command = if is_onboard {
+        onboard.as_ref()
+      } else {
+        active.map(|p| &p.command)
+      };
+      robot.requested_voltage = robot
+        .controller
+        .tick(at, local_command, &robot.observations);
       // Receiver safety/watchdog gates even a custom controller's output.
       if active.is_none() || robot.power.brownout {
         robot.requested_voltage = [None; 4];
@@ -2292,9 +2316,16 @@ impl RealisticWorld {
           0.0
         };
       }
-      let dribbler = active.is_some_and(|p| p.command.dribbler_on);
+      let dribbler = local_command.is_some_and(|c| c.dribbler_on);
       let validity = active.map(|p| (p.expires_at, p.safety_epoch));
-      let action = robot.receiver.take_kick(at);
+      // Onboard one-shot logic runs after transport; low-level host actions
+      // retain receiver deduplication across both radio paths.
+      let action = if is_onboard {
+        onboard
+          .filter(|c| c.kick_speed.is_finite() && c.kick_speed > 0.0 && c.kick_angle.is_finite())
+      } else {
+        robot.receiver.take_kick(at)
+      };
       if action.is_some() {
         self.diagnostics.actions_consumed += 1;
       }

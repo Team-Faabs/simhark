@@ -556,6 +556,9 @@ struct Filter {
   seen: TimeNs,
   yaw: Option<f64>,
   omega: Option<f64>,
+  // A second hypothesis lets sustained maneuvers recover without accepting a lone outlier.
+  candidate: Option<Box<Filter>>,
+  candidate_hits: u8,
 }
 pub struct VisionTracker {
   camera_origins: BTreeMap<u32, Vector3<f64>>,
@@ -707,6 +710,8 @@ impl Filter {
       seen: at,
       yaw: None,
       omega: None,
+      candidate: None,
+      candidate_hits: 0,
     }
   }
   fn predict(&mut self, at: TimeNs, config: &TrackerConfig) {
@@ -746,8 +751,32 @@ fn update(
   at: TimeNs,
   config: &TrackerConfig,
 ) -> bool {
+  update_impl(f, position, yaw, at, config, true)
+}
+fn update_gated(
+  f: &mut Filter,
+  position: [f64; 2],
+  yaw: Option<f64>,
+  at: TimeNs,
+  config: &TrackerConfig,
+) -> bool {
+  update_impl(f, position, yaw, at, config, false)
+}
+fn update_impl(
+  f: &mut Filter,
+  position: [f64; 2],
+  yaw: Option<f64>,
+  at: TimeNs,
+  config: &TrackerConfig,
+  reacquire: bool,
+) -> bool {
   if at < f.at {
     return false;
+  }
+  if at.saturating_sub(f.seen) > config.max_age_ns {
+    *f = Filter::new(position, at, config);
+    f.yaw = yaw;
+    return true;
   }
   let dt = (at - f.seen) as f64 * 1e-9;
   f.predict(at, config);
@@ -760,8 +789,31 @@ fn update(
   };
   let residual = nalgebra::Vector2::new(position[0] - f.x[0], position[1] - f.x[1]);
   if (residual.transpose() * inv * residual)[0] > config.gate_sigma.powi(2) {
+    if !reacquire {
+      return false;
+    }
+    let mut candidate = f
+      .candidate
+      .take()
+      .unwrap_or_else(|| Box::new(Filter::new(position, at, config)));
+    // update_gated never starts another hypothesis inside the candidate.
+    let advances = at > candidate.seen;
+    if update_gated(&mut candidate, position, yaw, at, config) {
+      f.candidate_hits += u8::from(advances || f.candidate_hits == 0);
+      if f.candidate_hits >= 3 {
+        *f = *candidate;
+        return true;
+      }
+    } else {
+      candidate = Box::new(Filter::new(position, at, config));
+      candidate.yaw = yaw;
+      f.candidate_hits = 1;
+    }
+    f.candidate = Some(candidate);
     return false;
   }
+  f.candidate = None;
+  f.candidate_hits = 0;
   let k = p * h.transpose() * inv;
   let state = nalgebra::SVector::<f64, 4>::from(f.x) + k * residual;
   let eye = nalgebra::SMatrix::<f64, 4, 4>::identity() - k * h;
@@ -784,6 +836,29 @@ pub(crate) fn wrap(angle: f64) -> f64 {
 }
 
 impl ObservedWorld {
+  /// Extrapolate only a completed tracker result; never expose an in-flight job.
+  pub(crate) fn at_time(&self, at: TimeNs, max_age_ns: TimeNs) -> Self {
+    let mut world = self.clone();
+    world.at = at;
+    let fresh = |t: &TrackedObject| at.saturating_sub(t.last_observed_at) <= max_age_ns;
+    world.robots.retain(|_, t| fresh(t));
+    world.ball = world.ball.filter(fresh);
+    if world.ball.is_none() {
+      world.ball_height_m = None;
+    }
+    for t in world.robots.values_mut().chain(world.ball.iter_mut()) {
+      let dt = at.saturating_sub(t.predicted_at) as f64 * 1e-9;
+      for i in 0..2 {
+        t.position_m[i] += t.velocity_m_s[i] * dt;
+      }
+      t.orientation_rad = t
+        .orientation_rad
+        .map(|yaw| wrap(yaw + t.angular_rate_rad_s.unwrap_or(0.0) * dt));
+      t.predicted_at = at;
+    }
+    world
+  }
+
   pub fn legacy_state(
     &self,
     world_id: usize,

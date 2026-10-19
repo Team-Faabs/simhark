@@ -21,6 +21,7 @@ webinterface-crashpilot-bridge = { git = "https://github.com/Technulgy-LGNU/inte
 webinterface-protocol = { git = "https://github.com/Technulgy-LGNU/interfaabs", optional = true }
 
 [features]
+realistic = ["simhark/realistic", "dep:prost"]
 default = []
 viewer = [
   "simhark_testing/viewer",

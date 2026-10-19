@@ -829,10 +829,17 @@ struct FixedFirmwareDt {
 #[cfg(feature = "sim-time")]
 impl FixedFirmwareDt {
   fn enable() -> Self {
+    Self::with_step_ms(SIM_TIME_STEP_MS)
+  }
+  #[cfg(feature = "realistic")]
+  fn enable_for_rate(hz: u32) -> Self {
+    Self::with_step_ms(&(1000.0 / f64::from(hz)).to_string())
+  }
+  fn with_step_ms(step_ms: &str) -> Self {
     let previous = std::env::var_os("SIMHARK_FIXED_DT_MS");
     if previous.is_none() {
       unsafe {
-        std::env::set_var("SIMHARK_FIXED_DT_MS", SIM_TIME_STEP_MS);
+        std::env::set_var("SIMHARK_FIXED_DT_MS", step_ms);
       }
     }
     Self { previous }
@@ -1193,7 +1200,7 @@ fn command_world_velocity(command: &RobotCommand, robot: &RobotState) -> Option<
       let (sin, cos) = robot.orientation.sin_cos();
       Some((forward * cos - left * sin, forward * sin + left * cos))
     }
-    MoveCommand::WheelVelocity(_) => None,
+    MoveCommand::WheelVelocity(_) | MoveCommand::Onboard(_) => None,
   }
 }
 
@@ -1317,6 +1324,7 @@ fn format_move_command(command: &MoveCommand) -> String {
     MoveCommand::GlobalVelocity { vx, vy, angular } => {
       format!("global vx={vx:.2} vy={vy:.2} w={angular:.2}")
     }
+    MoveCommand::Onboard(bytes) => format!("onboard({} bytes)", bytes.len()),
     MoveCommand::WheelVelocity(wheels) => format!(
       "wheels [{:.1},{:.1},{:.1},{:.1}]",
       wheels[0], wheels[1], wheels[2], wheels[3]

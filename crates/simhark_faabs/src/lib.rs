@@ -5,6 +5,8 @@ mod debug;
 pub mod game_controller;
 #[cfg(feature = "interface")]
 mod interface;
+#[cfg(feature = "realistic")]
+mod realistic;
 mod run;
 pub mod synth;
 
@@ -16,7 +18,7 @@ use core_dump::types::{Ai, DummyAi};
 use crashpilot::CrashPilot;
 use crashpilot::communication::RobotHeartbeat;
 use crashpilot::config::{LoggingConfig, RobotConfig, ServerConfig, SslConfig};
-#[cfg(feature = "viewer")]
+#[cfg(any(feature = "viewer", feature = "realistic"))]
 use prost::Message;
 use simhark::{TeamColor, WorldCommand, WorldState};
 use std::collections::HashMap;
@@ -33,6 +35,8 @@ pub type FaabsCommunication = ();
 
 pub struct Faabs<A: Ai = DummyAi> {
   pub robots: Vec<Robot<()>>,
+  #[cfg(feature = "realistic")]
+  host_only: bool,
   pub crash_pilot: CrashPilot<FaabsCommunication, A>,
   pub feedback_robot: u32,
   pub team: TeamColor,
@@ -110,6 +114,8 @@ impl<A: Ai + Send> Faabs<A> {
 
     let mut this = Self {
       robots,
+      #[cfg(feature = "realistic")]
+      host_only: false,
       crash_pilot: CrashPilot::from_parts(
         cp_config,
         comm,
@@ -170,6 +176,23 @@ impl<A: Ai + Send> Faabs<A> {
     command: &mut WorldCommand,
     referee: Option<core_dump::proto::Referee>,
   ) {
+    #[cfg(feature = "realistic")]
+    if self.host_only {
+      let robots = if self.team == TeamColor::Blue {
+        &state.blue_robots
+      } else {
+        &state.yellow_robots
+      };
+      if let Some(robot) = robots.get(self.feedback_robot as usize % robots.len().max(1)) {
+        // This state contains only delayed host feedback supplied by the runner.
+        self.events.rf = Some(core_dump::proto::CrashpilotRobotFeedback {
+          robot_id: robot.id as u32,
+          has_ball: robot.infrared,
+          timestamp: state.sim_time,
+          ..Default::default()
+        });
+      }
+    }
     world_state_to_cp_events(&mut self.events, state);
     self.events.gc = referee;
 
@@ -220,6 +243,19 @@ impl<A: Ai + Send> Faabs<A> {
     self.events.ws = ws;
 
     for (id, data) in robots {
+      #[cfg(feature = "realistic")]
+      if self.host_only {
+        let output = if self.team == TeamColor::Blue {
+          &mut command.blue
+        } else {
+          &mut command.yellow
+        };
+        output.push(simhark::RobotCommand {
+          move_command: Some(simhark::MoveCommand::Onboard(data.msg.encode_to_vec())),
+          ..simhark::RobotCommand::noop(id as usize)
+        });
+        continue;
+      }
       let Some(robot) = self.robots.get_mut(id as usize) else {
         panic!(
           "Received data for robot with id {}, but only {} robots are configured",
@@ -257,7 +293,9 @@ impl<A: Ai + Send> Faabs<A> {
     }
 
     self.feedback_robot += 1;
-    self.feedback_robot %= self.robots.len() as u32;
+    if !self.robots.is_empty() {
+      self.feedback_robot %= self.robots.len() as u32;
+    }
 
     #[cfg(feature = "viewer-debug")]
     {

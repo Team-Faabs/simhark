@@ -18,7 +18,7 @@ use simhark::{
 
 pub fn run(mc: &MatchConfig, profile: RealisticConfig) -> Result<MatchReport> {
   #[cfg(feature = "sim-time")]
-  let _fixed = super::FixedFirmwareDt::enable();
+  let _fixed = super::FixedFirmwareDt::enable_for_rate(profile.control_rate_hz);
   let ai_rate = profile.ai_rate_hz;
   anyhow::ensure!(
     !mc.dev,
@@ -42,9 +42,19 @@ pub fn run(mc: &MatchConfig, profile: RealisticConfig) -> Result<MatchReport> {
   let names = std::array::from_fn::<_, 2, _>(|i| format!("{:?}:{}", colors[i], kinds[i].label()));
   let mut evaluator = Evaluator::new(cfg.clone(), names[0].clone(), names[1].clone());
   let mut sim = RealisticWorld::new(0, cfg.clone(), profile).map_err(anyhow::Error::msg)?;
-  if mc.replay.is_some() {
-    sim.enable_recording();
+  for controller in controllers.iter_mut().flatten() {
+    controller
+      .install_onboard(&mut sim, &cfg)
+      .map_err(anyhow::Error::msg)?;
   }
+  let mut replay = mc.replay.as_ref().map(|_| {
+    simhark::replay::ReplayRecorder::new(
+      1,
+      cfg.clone(),
+      f64::from(ai_rate),
+      "match-runner realistic".into(),
+    )
+  });
   let mut director =
     MatchDirector::new(cfg.clone(), mc.seconds).with_bot_counts(physical.blue, physical.yellow);
   director.set_teleport_ball_on_no_progress(mc.teleport_ball_on_no_progress);
@@ -194,13 +204,16 @@ pub fn run(mc: &MatchConfig, profile: RealisticConfig) -> Result<MatchReport> {
       last_safety = safety;
     }
     sim
-      .submit_decision(commands, sim.now(), epoch, safety)
+      .submit_decision(commands.clone(), sim.now(), epoch, safety)
       .map_err(anyhow::Error::msg)?;
     frame += 1;
     let next = ((frame as u128 * 1_000_000_000 / u128::from(ai_rate)) as u64).min(end);
     sim.advance_to(next).map_err(anyhow::Error::msg)?;
     let truth = sim.truth();
     evaluator.tick(&truth, Some(&previous));
+    if let Some(recorder) = &mut replay {
+      recorder.push_frame(vec![truth.clone()], vec![commands]);
+    }
     #[cfg(feature = "viewer")]
     if let Some(v) = &viewer {
       v.publish(&truth);
@@ -210,16 +223,8 @@ pub fn run(mc: &MatchConfig, profile: RealisticConfig) -> Result<MatchReport> {
       pacer.pace(sim.now());
     }
   }
-  if let Some(path) = &mc.replay {
-    let binary = std::fs::read(std::env::current_exe()?)?;
-    let identity = format!(
-      "match-runner executable {}",
-      simhark::realistic::calibration::digest(&binary).map_err(anyhow::Error::msg)?
-    );
-    serde_json::to_writer(
-      std::io::BufWriter::new(std::fs::File::create(path)?),
-      &sim.recording(identity),
-    )?;
+  if let (Some(path), Some(recorder)) = (&mc.replay, replay) {
+    recorder.finish().write_zstd(path)?;
   }
   if !mc.quiet {
     println!(
@@ -247,4 +252,38 @@ fn team_state(
     }
   }
   Some(state)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  #[test]
+  fn realistic_match_replay_uses_the_viewers_binary_format() {
+    let path = std::env::temp_dir().join(format!(
+      "simhark-realistic-match-{}.shreplay",
+      std::process::id()
+    ));
+    let mc = MatchConfig {
+      blue: crate::controller::TeamKind::Dummy,
+      yellow: crate::controller::TeamKind::Dummy,
+      seconds: 0.1,
+      blue_bots: Some(1),
+      yellow_bots: Some(1),
+      quiet: true,
+      replay: Some(path.to_string_lossy().into_owned()),
+      ..Default::default()
+    };
+    run(&mc, RealisticConfig::default()).unwrap();
+    let log = simhark::ReplayLog::read_zstd(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(!log.frames.is_empty());
+    assert_eq!(log.metadata.world_count, 1);
+    assert!(
+      log
+        .frames
+        .iter()
+        .all(|f| f.states.len() == 1 && f.commands.len() == 1)
+    );
+    assert!(log.frames.last().unwrap().sim_time > 0.09);
+  }
 }

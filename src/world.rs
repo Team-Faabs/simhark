@@ -202,6 +202,7 @@ impl World {
             );
           }
           MoveCommand::WheelVelocity(speeds) => sim.set_wheel_speeds(*speeds),
+          MoveCommand::Onboard(_) => sim.set_wheel_speeds([0.0; 4]),
         }
       }
 
