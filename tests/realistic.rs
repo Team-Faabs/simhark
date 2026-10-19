@@ -484,3 +484,207 @@ fn radio_capacity_is_checked_against_team_size() {
       .contains("airtime")
   );
 }
+
+fn noisy_drive_config() -> RealisticConfig {
+  let mut config = RealisticConfig::default();
+  config.motor.voltage_noise_std_v = 0.15;
+  config.motor.voltage_noise_time_constant_s = 0.02;
+  config.motor.encoder_noise_std_ticks = 0.5;
+  config.motor.encoder_dropout_probability = 0.2;
+  config
+}
+
+#[test]
+fn noisy_drive_replays_and_is_independent_of_advance_partitioning() {
+  let mut a = world(noisy_drive_config());
+  let mut b = world(noisy_drive_config());
+  a.enable_recording();
+  b.enable_recording();
+  a.publish(commands(), 0, 1, Safety::Run).unwrap();
+  b.publish(commands(), 0, 1, Safety::Run).unwrap();
+  a.advance_to(100_000_000).unwrap();
+  for at in [123, 333_333, 20_555_555, 55_000_000, 100_000_000] {
+    b.advance_to(at).unwrap();
+  }
+  assert_eq!(
+    bincode::serialize(&a.truth()).unwrap(),
+    bincode::serialize(&b.truth()).unwrap()
+  );
+  let recording = a.recording("noisy-drive".into());
+  // Recorded advance requests intentionally differ, but scheduled events and
+  // final hardware must be identical regardless of those request boundaries.
+  let partitioned = b.recording("noisy-drive".into());
+  assert!(
+    serde_json::to_vec(&recording.events).unwrap()
+      == serde_json::to_vec(&partitioned.events).unwrap()
+  );
+  assert!(
+    serde_json::to_vec(&recording.diagnostics).unwrap()
+      == serde_json::to_vec(&partitioned.diagnostics).unwrap()
+  );
+  assert!(
+    serde_json::to_vec(&recording.final_hardware).unwrap()
+      == serde_json::to_vec(&partitioned.final_hardware).unwrap()
+  );
+  let recording: simhark::realistic::Recording =
+    serde_json::from_slice(&serde_json::to_vec(&recording).unwrap()).unwrap();
+  let replay = recording.replay("noisy-drive").unwrap();
+  assert_eq!(
+    bincode::serialize(&a.truth()).unwrap(),
+    bincode::serialize(&replay.truth()).unwrap()
+  );
+  assert_eq!(
+    serde_json::to_vec(&recording).unwrap(),
+    serde_json::to_vec(&replay.recording("noisy-drive".into())).unwrap()
+  );
+}
+
+#[test]
+fn encoder_noise_does_not_move_shafts_and_dropout_does_not_drop_telemetry() {
+  let mut config = noisy_drive_config();
+  config.motor.encoder_noise_std_ticks = 100.0;
+  config.motor.encoder_dropout_probability = 0.0;
+  let mut noisy = world(config.clone());
+  noisy.advance_to(30_000_000).unwrap();
+  assert!(
+    noisy
+      .observations(TeamColor::Blue, 0)
+      .unwrap()
+      .encoder
+      .as_ref()
+      .unwrap()
+      .ticks
+      .iter()
+      .any(|&t| t != 0)
+  );
+  assert!(
+    noisy
+      .robot_diagnostics()
+      .iter()
+      .flat_map(|r| &r.motors)
+      .all(|m| m.speed_rad_s == 0.0 && m.angle_rad == 0.0)
+  );
+  config.motor.encoder_dropout_probability = 1.0;
+  let mut dropped = world(config);
+  dropped.advance_to(30_000_000).unwrap();
+  let observations = dropped.observations(TeamColor::Blue, 0).unwrap();
+  assert!(observations.encoder.is_none());
+  assert!(observations.telemetry.is_some());
+  assert!(
+    dropped
+      .robot_diagnostics()
+      .iter()
+      .flat_map(|r| &r.motors)
+      .all(|m| m.speed_rad_s == 0.0)
+  );
+}
+
+#[test]
+fn encoder_speed_spans_dropped_acquisitions() {
+  let mut config = RealisticConfig::default();
+  config.motor.encoder_dropout_probability = 0.4;
+  let period = SECOND / u64::from(config.control_rate_hz);
+  let delivery = config.imu.delivery_delay_ns;
+  let resolution = f64::from(config.motor.encoder_ticks_per_revolution);
+  let mut sim = world(config);
+  sim
+    .set_controller(TeamColor::Blue, 0, Box::new(ConstantVoltage))
+    .unwrap();
+  sim.publish(commands(), 0, 1, Safety::Run).unwrap();
+  let mut previous: Option<simhark::realistic::sensors::EncoderSample> = None;
+  let mut saw_gap = false;
+  let mut saw_motion = false;
+  for i in 0..60 {
+    sim.advance_to(i * period + delivery).unwrap();
+    let Some(sample) = sim
+      .observations(TeamColor::Blue, 0)
+      .unwrap()
+      .encoder
+      .clone()
+    else {
+      continue;
+    };
+    if let Some(last) = &previous {
+      if sample.sampled_at == last.sampled_at {
+        continue;
+      }
+      let elapsed = sample.sampled_at - last.sampled_at;
+      saw_gap |= elapsed > period;
+      for wheel in 0..4 {
+        let expected = (sample.ticks[wheel] - last.ticks[wheel]) as f64 * std::f64::consts::TAU
+          / resolution
+          / (elapsed as f64 * 1e-9);
+        assert_eq!(sample.speed_rad_s[wheel], expected);
+        saw_motion |= expected != 0.0;
+      }
+    }
+    previous = Some(sample);
+  }
+  assert!(saw_gap && saw_motion);
+}
+
+#[test]
+fn motor_noise_changes_physical_rotation_in_both_dynamics_modes() {
+  use simhark::realistic::profile::Dynamics;
+  for dynamics in [Dynamics::Planar, Dynamics::Free3d] {
+    let mut config = RealisticConfig::default();
+    config.hardware.dynamics = dynamics;
+    let mut clean = world(config.clone());
+    config.motor.voltage_noise_std_v = 0.5;
+    config.motor.voltage_noise_time_constant_s = 0.02;
+    let mut noisy = world(config);
+    for sim in [&mut clean, &mut noisy] {
+      sim
+        .set_controller(TeamColor::Blue, 0, Box::new(ConstantVoltage))
+        .unwrap();
+      sim.publish(commands(), 0, 1, Safety::Run).unwrap();
+      sim.advance_to(10_000_000).unwrap();
+    }
+    let clean = clean.robot_diagnostics();
+    let noisy = noisy.robot_diagnostics();
+    assert!(
+      clean[0]
+        .motors
+        .iter()
+        .zip(&noisy[0].motors)
+        .any(|(a, b)| a.angle_rad != b.angle_rad)
+    );
+  }
+}
+
+#[test]
+fn motor_noise_profiles_validate_and_old_profiles_default_to_no_noise() {
+  let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let root = if root.join("profiles").is_dir() {
+    root.to_path_buf()
+  } else {
+    root.join("../..")
+  };
+  let profile = simhark::realistic::profiles::resolve(&[
+    root.join("profiles/realistic/full.toml"),
+    root.join("profiles/realistic/noisy-drive.toml"),
+  ])
+  .unwrap();
+  assert_eq!(profile.config.motor.voltage_noise_std_v, 0.15);
+  assert_eq!(profile.config.motor.encoder_dropout_probability, 0.01);
+  let old: MotorConfig = serde_json::from_str("{}").unwrap();
+  assert_eq!(old.voltage_noise_std_v, 0.0);
+  assert_eq!(old.encoder_noise_std_ticks, 0.0);
+  assert_eq!(old.encoder_dropout_probability, 0.0);
+  for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+    for field in 0..3 {
+      let mut config = MotorConfig::default();
+      match field {
+        0 => config.voltage_noise_std_v = invalid,
+        1 => config.voltage_noise_time_constant_s = invalid,
+        _ => config.encoder_noise_std_ticks = invalid,
+      }
+      assert!(config.validate().is_err());
+    }
+  }
+  for invalid in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+    let mut config = MotorConfig::default();
+    config.encoder_dropout_probability = invalid;
+    assert!(config.validate().is_err());
+  }
+}
